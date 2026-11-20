@@ -1,0 +1,36 @@
+{
+  "name": "scrubline",
+  "version": "0.0.0",
+  "description": "Find and mask secrets and personal data in text before it is logged, shared or sent to an AI. Typed, numbered, reversible masks. Zero runtime dependencies.",
+  "license": "MIT",
+  "author": "Abdulqadir Jimoh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Abdul-Jimoh/scrubline.git"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "fast-check": "4.10.2",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}

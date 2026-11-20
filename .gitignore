@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+.claude/
+# planning stays private: only these markdown files are public
+*.md
+!README.md
+!AGENTS.md
+!CHANGELOG.md
+!docs/evidence/**/*.md
+
+# raw screenshots (may show email/account details); only cropped copies go in docs/evidence/
+docs/evidence-raw/
