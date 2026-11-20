@@ -27,7 +27,7 @@ function regexDetector(kind: string, pattern: RegExp, accept?: (match: string) =
 }
 
 /**
- * A character before a token's start that does not glue it to a word: one that ends an escape (`\n`, `\t`, `A`),
+ * A character before a token's start that does not glue it to a word: one that ends an escape (`\n`, `\t`, `\uXXXX`),
  * a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code (`ESC[32m`, also written `\u001b[32m`). Logs put keys
  * right after these. Evaluated just after that character.
  */
@@ -55,9 +55,27 @@ function token(kind: string, body: string, guard = ALNUM, endGuard = guard): Det
 // block cannot hold, such as the `"` that closes a JSON string.
 const KEY_HEADER = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
 const KEY_FOOTER = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
-const KEY_BODY = /(?:[A-Za-z0-9+/=\s:,.()<>@'-]|\\[nrt/])*/y;
 /** Longest block, BEGIN to END, treated as one key (an RSA-4096 PEM is about 3.3 KB; PGP blocks can be larger). */
 const MAX_BLOCK = 64 * 1024;
+
+/** ASCII characters a key block body can hold: base64, whitespace, and what armour and header lines use. */
+const KEY_BODY_CHAR = new Uint8Array(128);
+for (const c of "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=:,.()<>@'- \t\n\v\f\r")
+  KEY_BODY_CHAR[c.charCodeAt(0)] = 1;
+
+/**
+ * End of a truncated block's body: the first character a key block cannot hold, with `\n`, `\r`, `\t` and `\/`
+ * escapes (JSON) counted as part of the body. A loop, not a regex: a repeated alternation overflowed V8's stack on
+ * bodies of about 10 MB.
+ */
+function keyBodyEnd(input: string, i: number): number {
+  for (;;) {
+    const c = input.charCodeAt(i);
+    if (c < 128 && KEY_BODY_CHAR[c]) i++;
+    else if (c === 92 && i + 1 < input.length && 'nrt/'.includes(input[i + 1]!)) i += 2;
+    else return i;
+  }
+}
 
 function* findKeyBlocks(input: string): Iterable<readonly [number, number]> {
   let footer = -2; // index of the next footer at or after the last search; -1: none left; -2: not searched yet
@@ -73,11 +91,7 @@ function* findKeyBlocks(input: string): Iterable<readonly [number, number]> {
       footer = f ? f.index : -1;
       footerEnd = f ? f.index + f[0].length : 0;
     }
-    if (footer !== -1 && footer - bodyStart <= MAX_BLOCK) prevEnd = footerEnd;
-    else {
-      KEY_BODY.lastIndex = bodyStart;
-      prevEnd = bodyStart + (KEY_BODY.exec(input)?.[0].length ?? 0);
-    }
+    prevEnd = footer !== -1 && footer - bodyStart <= MAX_BLOCK ? footerEnd : keyBodyEnd(input, bodyStart);
     yield [h.index, prevEnd];
   }
 }
@@ -105,12 +119,16 @@ export const DETECTORS: readonly Detector[] = [
     'TELEGRAM_BOT_TOKEN',
     new RegExp(`(?<![${ALNUM}]${ENDS_ESCAPE}(?<!/bot))[0-9]{8,10}:[${B64URL}]{35}${end(B64URL)}`, 'g'),
   ),
-  // The start guard also excludes `\`, so in `\njane@…` the match starts at `j`, not at the `n` of the escape. The
-  // local part leaves out `%` (obsolete in addresses): with it, a URL-encoded run like `…%3D…%3D…@` was one long
-  // local part that every start inside it rescanned.
+  // An address may not start on the letter of an escape, so in `\njane@…` it starts at `j`, not at the `n` (after
+  // other characters, `DOMAIN\jane@…`, it starts right after the backslash). The local part leaves out `%`
+  // (obsolete in addresses): with it, a URL-encoded run like `…%3D…%3D…@` was one long local part that every start
+  // inside it rescanned. A start right after `%` is allowed unless the `%` begins a URL-encoded byte (`%3D`).
   regexDetector(
     'EMAIL',
-    new RegExp(`${start(String.raw`A-Za-z0-9._%+\\-`)}[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}${end(ALNUM)}`, 'g'),
+    new RegExp(
+      `${start('A-Za-z0-9._+-')}(?<!\\\\(?=[nrtfbv]|u[0-9A-Fa-f]{4}))(?<!%(?=[0-9A-Fa-f]{2}))[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}${end(ALNUM)}`,
+      'g',
+    ),
     // `git@github.com:org/repo` is an SSH remote, not a person.
     (m) => !/^git@/i.test(m),
   ),

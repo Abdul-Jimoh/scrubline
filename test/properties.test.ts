@@ -68,13 +68,15 @@ const filler = fc.oneof(
   chars(ALNUM + ' .,:;!?()_-/#=+"\'', 0, 30),
   fc.tuple(fc.constantFrom('EMAIL', 'AWS_KEY', 'JWT', 'GITHUB_TOKEN', 'X'), fc.nat(4)).map(([k, n]) => `[${k}_${n}]`),
   fc.constantFrom('[', ']', '[EMAIL_', '_1]', '[]'),
+  // Text that turns into a key-shaped run once an escape letter sits in front of it (`\n` + `pm_…`).
+  fc.constantFrom('pm_', 'k_live_', 'hp_').chain((p) => token(p, ALNUM, 36)),
 );
 // Real neighbours of a key: whitespace, punctuation, assignments, quotes, JSON escapes written out as text, control
 // characters (JSON-encoded as \u0001), ANSI colour codes and URL-encoded bytes. (A key glued to a letter or digit
 // on either side is not a key boundary; test/scrub.test.ts covers `_` and Telegram's `/bot<token>`.)
 const separator = fc.constantFrom(
   ...[' ', '\n', ', ', '; ', '\t', ' (', ') ', '\\n', '\\t', '=', '"', ':', '/', "='", '\r\n'],
-  ...['\x01', '\x1f', '\x1b[32m', '\x1b[0m ', '\\u001b[31m', '%3D', '%20', '&token=', '\\u00e9'],
+  ...['\x01', '\x1f', '\x1b[32m', '\x1b[0m ', '\\u001b[31m', '%3D', '%20', '&token=', '\\u00e9', '\\', '%'],
 );
 
 /** A document of filler with planted secrets; `secrets` lists what was planted. */

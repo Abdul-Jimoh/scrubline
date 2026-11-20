@@ -61,7 +61,18 @@ function collect(input: string, detectors: readonly Detector[]): Span[] {
     while (i < taken.length) merged.push(taken[i++]!);
     taken = merged;
   }
-  return taken;
+  return taken.map((s, k) => absorbEscape(input, s, k > 0 ? taken[k - 1]!.end : 0));
+}
+
+/**
+ * A span right after an unpaired backslash takes the backslash too. In `\npm_…` the `n` may end a `\n` escape or
+ * start an npm token; masking the token without its backslash would leave `\[NPM_TOKEN_1]`, an invalid escape that
+ * breaks JSON. Masking one character more keeps the text valid and still restores exactly.
+ */
+function absorbEscape(input: string, s: Span, prevEnd: number): Span {
+  let n = 0;
+  while (s.start - n - 1 >= prevEnd && input.charCodeAt(s.start - n - 1) === 92) n++;
+  return n % 2 === 1 ? { ...s, start: s.start - 1 } : s;
 }
 
 /**

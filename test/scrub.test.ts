@@ -64,6 +64,34 @@ describe('token boundaries', () => {
     expect(JSON.parse(scrub(JSON.stringify({ m: '\x01@b.co' })).text)).toEqual({ m: '\x01@b.co' });
   });
 
+  it('a token whose first letter could end an escape takes the backslash with it, so JSON stays valid', () => {
+    // `\n` + `pm_…` reads as a newline then `pm_…`, or as a backslash then an npm token; mask either way.
+    const npm = FAKE.NPM_TOKEN.slice(1);
+    const stripe = FAKE.STRIPE_KEY.slice(1);
+    for (const m of [`\n${npm}`, `x\r${stripe}`]) {
+      const json = JSON.stringify({ m });
+      const { text, map } = scrub(json);
+      expect(() => JSON.parse(text)).not.toThrow();
+      expect(text).not.toContain(npm);
+      expect(text).not.toContain(stripe);
+      expect(restore(text, map)).toBe(json);
+    }
+    // A backslash that is itself escaped (`\\`) is left alone.
+    expect(scrub(`C:\\\\${FAKE.NPM_TOKEN}`).text).toBe('C:\\\\[NPM_TOKEN_1]');
+  });
+
+  it('masks an address after a backslash that is not an escape (DOMAIN\\user style)', () => {
+    const { text, map } = scrub(`CORP\\${FAKE.EMAIL}`);
+    expect(text).toBe('CORP[EMAIL_1]');
+    expect(map['[EMAIL_1]']).toBe(`\\${FAKE.EMAIL}`);
+  });
+
+  it('masks an address right after a % that does not start a URL-encoded byte', () => {
+    expect(scrub(`a%${FAKE.EMAIL}`).text).toBe('a%[EMAIL_1]');
+    expect(scrub(`x %${FAKE.EMAIL}`).text).toBe('x %[EMAIL_1]');
+    expect(scrub(`token%3D${FAKE.EMAIL}`).text).toBe('token%3D[EMAIL_1]');
+  });
+
   it('a lower-priority match that overlaps a key does not hide a real value inside it', () => {
     // The email pattern first matches from `npm_…` (its local part allows `_` and `%`); found by fast-check.
     expect(scrub(`${FAKE.NPM_TOKEN}%3D${FAKE.EMAIL}`).text).toBe('[NPM_TOKEN_1]%3D[EMAIL_1]');

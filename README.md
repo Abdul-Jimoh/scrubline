@@ -62,9 +62,10 @@ console.log(restore(answer, map)); // placeholders in the model's answer become 
 | `EMAIL` | email addresses (an SSH remote like `git@github.com:…` is kept) |
 
 Keys are found at token boundaries: after whitespace, punctuation, `_` or quotes; after an escape (`\n`, `\t`,
-`A`), a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code; and in Telegram's `…/bot<token>/…` URLs.
+`\uXXXX`), a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code; and in Telegram's `…/bot<token>/…` URLs.
 A complete private key block (BEGIN to END) is masked whatever its armour lines hold. A scrubbed JSON document
-stays valid JSON: no mask starts or ends inside an escape (one exception is under Known limits).
+stays valid JSON: no mask starts inside an escape, and a mask that would start right after an escaping backslash
+(`\n` + `pm_…`) takes the backslash with it. One exception is under Known limits.
 
 Planned, not built yet: labelled secrets (`password=…`), connection strings, phone and card numbers, IP addresses,
 home paths, high-entropy strings, custom rules, streaming and the CLI. They will be opened as issues in the backlog.
@@ -73,11 +74,17 @@ home paths, high-entropy strings, custom rules, streaming and the CLI. They will
 
 - A key glued to a letter or digit on either side (`xAKIA…`), other than in the cases above, is not treated as a key.
 - Any `git@…` address is kept, so a real mailbox named `git` is not masked. Addresses with `%` in the local part
-  are masked only from after the `%`.
-- A private key block without its END line (a truncated paste) is masked up to the first character a key block
-  cannot hold, such as the quote that closes a JSON string. A block longer than 64 KB counts as having no END line.
-- A block whose BEGIN is in one JSON string and END in another is masked as one span, which breaks that JSON (the
-  key material is still masked).
+  are masked only from after the last `%` (from after `%XX` when the `%` is followed by two hex digits); one whose
+  local part ends in `%XX` (`jane%3D@…`) is not masked at all.
+- URL-encoded addresses with no literal `@` (`?email=jane%40example.com`) are not detected.
+- In plain text, a mask right after a lone backslash (`DOMAIN\jane@…`) includes the backslash, so that value gets
+  its own placeholder, separate from the same address elsewhere, and `restore` puts the backslash back with it.
+- A private key block is masked from BEGIN to the next END line within 64 KB, even when the BEGIN belonged to a
+  truncated paste and the END to a later block: everything in between is masked too (over-masking, not a leak).
+- With no END line within 64 KB, a block is masked up to the first character a key block cannot hold, such as the
+  quote that closes a JSON string.
+- A block whose BEGIN sits in a JSON object key and whose END comes later breaks that JSON (the key material is
+  still masked). Between two string values the JSON stays valid, but the fields in between are masked with it.
 
 ## How it is tested
 
@@ -90,7 +97,8 @@ home paths, high-entropy strings, custom rules, streaming and the CLI. They will
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
 | In generated documents (fake keys of every format, armoured key blocks, emails, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid | `test/properties.test.ts` |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
-| Scan time stays linear: eight crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; about 5 ms and 140 ms on an M-series laptop) |
+| Scan time stays linear: eight crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; about 5 ms and 140–200 ms on an M-series laptop) |
+| A 12 MB key block with no END line is masked rather than throwing | `test/performance.test.ts`: "very large input" |
 
 Every key in the tests is fake and is assembled at runtime, so the repository never holds a complete key-shaped string.
 

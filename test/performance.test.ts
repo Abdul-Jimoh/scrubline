@@ -14,8 +14,9 @@ const adversarial: [string, string][] = [
   ['repeated JWT headers with no dots', 'eyJ-'.repeat(N / 4)],
   ['repeated private key headers with no end', j('-----BEGIN ', 'PRIVATE KEY-----\n').repeat(N / 28)],
   ['one long token-shaped run', 'sk-' + 'a-'.repeat(N / 2)],
-  // Runs where a lower-priority pattern could start again after every key and rescan to the end (about 7 s at
-  // 1 MB before keys were blanked out for later detectors and `%` left the email local part).
+  // Runs where a lower-priority pattern could start again after every key and rescan to the end. An unreleased
+  // intermediate fix (resuming the search after each claimed key) was quadratic here: 224 ms at 172 KB, four times
+  // slower per doubling. Blanking claimed keys for later detectors keeps them linear.
   ['URL-encoded keys joined into one run, an @ at the end', j(FAKE.NPM_TOKEN, '%3D').repeat(N / 43) + 'x@a.co'],
   ['Anthropic keys joined by hyphens', j(FAKE.ANTHROPIC_KEY, '-').repeat(N / 46)],
 ];
@@ -27,6 +28,16 @@ describe('scan time stays linear on crafted input', () => {
       scrub(input);
       expect(Date.now() - t).toBeLessThan(1500);
     });
+});
+
+describe('very large input', () => {
+  // The truncated-block body was once a regex whose repeated alternation overflowed V8's stack near 10 MB, so
+  // scrub threw instead of masking.
+  it('a 12 MB private key block with no END line is masked, not thrown on', () => {
+    const block = j('-----BEGIN ', 'PRIVATE KEY-----\n') + 'QUJD'.repeat(3_000_000);
+    const { text } = scrub(`key: ${block}`);
+    expect(text).toBe('key: [PRIVATE_KEY_1]');
+  });
 });
 
 describe('scrub time stays linear in the number of findings', () => {
