@@ -14,6 +14,10 @@ const adversarial: [string, string][] = [
   ['repeated JWT headers with no dots', 'eyJ-'.repeat(N / 4)],
   ['repeated private key headers with no end', j('-----BEGIN ', 'PRIVATE KEY-----\n').repeat(N / 28)],
   ['one long token-shaped run', 'sk-' + 'a-'.repeat(N / 2)],
+  // Runs where a lower-priority pattern could start again after every key and rescan to the end (about 7 s at
+  // 1 MB before keys were blanked out for later detectors and `%` left the email local part).
+  ['URL-encoded keys joined into one run, an @ at the end', j(FAKE.NPM_TOKEN, '%3D').repeat(N / 43) + 'x@a.co'],
+  ['Anthropic keys joined by hyphens', j(FAKE.ANTHROPIC_KEY, '-').repeat(N / 46)],
 ];
 
 describe('scan time stays linear on crafted input', () => {
@@ -26,7 +30,7 @@ describe('scan time stays linear on crafted input', () => {
 });
 
 describe('scrub time stays linear in the number of findings', () => {
-  // About 3 MB with 160,000 findings. Emails are detected after AWS keys but appear before them in the text, so
+  // About 4 MB with 160,000 findings. Emails are detected after AWS keys but appear before them in the text, so
   // each email span lands in front of every key span. Inserting spans one at a time took about 4 s at 2.6 MB.
   it('160,000 findings in reversed priority order', () => {
     const n = 80_000;

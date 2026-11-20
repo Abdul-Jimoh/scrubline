@@ -61,18 +61,23 @@ console.log(restore(answer, map)); // placeholders in the model's answer become 
 | `NPM_TOKEN`, `HUGGINGFACE_TOKEN`, `SENDGRID_KEY`, `DIGITALOCEAN_TOKEN`, `TELEGRAM_BOT_TOKEN` | their published formats |
 | `EMAIL` | email addresses (an SSH remote like `git@github.com:…` is kept) |
 
-Keys are found at token boundaries: after whitespace, punctuation, `_`, quotes, or an escape such as `\n` in a
-JSON-encoded log. JSON stays valid after scrubbing.
+Keys are found at token boundaries: after whitespace, punctuation, `_` or quotes; after an escape (`\n`, `\t`,
+`A`), a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code; and in Telegram's `…/bot<token>/…` URLs.
+A complete private key block (BEGIN to END) is masked whatever its armour lines hold. A scrubbed JSON document
+stays valid JSON: no mask starts or ends inside an escape (one exception is under Known limits).
 
 Planned, not built yet: labelled secrets (`password=…`), connection strings, phone and card numbers, IP addresses,
 home paths, high-entropy strings, custom rules, streaming and the CLI. They will be opened as issues in the backlog.
 
 ## Known limits
 
-- A key glued to a letter or digit on either side (`xAKIA…`) is not treated as a key.
-- Any `git@…` address is kept, so a real mailbox named `git` is not masked.
-- A private key block without its END line is masked up to the first character a key block cannot hold (such as a
-  quote); a comment line with other characters ends the masked part early.
+- A key glued to a letter or digit on either side (`xAKIA…`), other than in the cases above, is not treated as a key.
+- Any `git@…` address is kept, so a real mailbox named `git` is not masked. Addresses with `%` in the local part
+  are masked only from after the `%`.
+- A private key block without its END line (a truncated paste) is masked up to the first character a key block
+  cannot hold, such as the quote that closes a JSON string. A block longer than 64 KB counts as having no END line.
+- A block whose BEGIN is in one JSON string and END in another is masked as one span, which breaks that JSON (the
+  key material is still masked).
 
 ## How it is tested
 
@@ -81,11 +86,11 @@ home paths, high-entropy strings, custom rules, streaming and the CLI. They will
 | Claim | Proof |
 |---|---|
 | Each format above is masked with its typed placeholder | `test/scrub.test.ts`: "every built-in detector" |
-| Keys ending in `-`, after `_`, or inside JSON-escaped text are masked; JSON stays valid | `test/scrub.test.ts`: "token boundaries", "private key blocks" |
+| The boundary cases above, JSON validity, and complete PGP/PEM blocks with armour lines (also in PHP-style `\/` JSON) | `test/scrub.test.ts`: "token boundaries", "private key blocks" |
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
-| In generated documents (fake keys of every format, emails, placeholder look-alikes, JSON-escaped separators), no planted value survives, as plain text or JSON-encoded | `test/properties.test.ts` |
+| In generated documents (fake keys of every format, armoured key blocks, emails, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid | `test/properties.test.ts` |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
-| Scan time stays linear: crafted 200,000-character inputs and a 3 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; about 5 ms and 120 ms on an M-series laptop) |
+| Scan time stays linear: eight crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; about 5 ms and 140 ms on an M-series laptop) |
 
 Every key in the tests is fake and is assembled at runtime, so the repository never holds a complete key-shaped string.
 

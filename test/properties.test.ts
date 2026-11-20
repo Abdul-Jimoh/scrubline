@@ -16,7 +16,19 @@ const token = (prefix: string, alphabet: string, min: number, max = min) => char
 const cat = (...parts: fc.Arbitrary<string>[]) => fc.tuple(...parts).map((p) => p.join(''));
 
 const b64Lines = fc.array(chars(ALNUM + '+/', 16, 64), { minLength: 1, maxLength: 4 }).map((l) => l.join('\n'));
-const pemLabel = fc.constantFrom('', 'RSA ', 'EC ', 'OPENSSH ', 'ENCRYPTED ');
+const pemLabel = fc.constantFrom('', 'RSA ', 'EC ', 'OPENSSH ', 'ENCRYPTED ', 'PGP ');
+/** Armour and header lines real blocks carry, including characters a bare key body never holds. */
+const armour = fc
+  .array(
+    fc.constantFrom(
+      'Version: GnuPG v1.4.11 (GNU/Linux)',
+      'Comment: Alice <alice@example.com> "work" key!',
+      'Proc-Type: 4,ENCRYPTED',
+      'DEK-Info: AES-128-CBC,0A1B2C3D4E5F6071',
+    ),
+    { maxLength: 2 },
+  )
+  .map((lines) => lines.map((l) => `${l}\n`).join(''));
 
 /** One generator per built-in format. */
 const planted = fc.oneof(
@@ -36,9 +48,10 @@ const planted = fc.oneof(
   cat(fc.constant('dop_v1_'), chars('0123456789abcdef', 64)),
   cat(chars(DIG, 8, 10), fc.constant(':'), token('', B64URL, 35)),
   cat(token('eyJ', B64URL, 10, 40), fc.constant('.'), token('eyJ', B64URL, 10, 60), fc.constant('.'), token('', B64URL, 10, 43)),
-  pemLabel.chain((label) =>
-    b64Lines.map((body) => `-----BEGIN ${label}PRIVATE KEY-----\n${body}\n-----END ${label}PRIVATE KEY-----`),
-  ),
+  fc.tuple(pemLabel, armour, b64Lines).map(([label, head, body]) => {
+    const block = label === 'PGP ' ? 'PRIVATE KEY BLOCK' : 'PRIVATE KEY';
+    return `-----BEGIN ${label}${block}-----\n${head}${body}\n-----END ${label}${block}-----`;
+  }),
   cat(
     chars(LOW + DIG, 1, 12).filter((l) => l !== 'git'),
     fc.constantFrom('', '.', '+', '-', '_'),
@@ -56,9 +69,13 @@ const filler = fc.oneof(
   fc.tuple(fc.constantFrom('EMAIL', 'AWS_KEY', 'JWT', 'GITHUB_TOKEN', 'X'), fc.nat(4)).map(([k, n]) => `[${k}_${n}]`),
   fc.constantFrom('[', ']', '[EMAIL_', '_1]', '[]'),
 );
-// Real neighbours of a key: whitespace, punctuation, assignments, quotes, and JSON escapes written out as text.
-// (A key glued to a letter or digit on either side is not a key boundary; test/scrub.test.ts covers `_`.)
-const separator = fc.constantFrom(' ', '\n', ', ', '; ', '\t', ' (', ') ', '\\n', '\\t', '=', '"', ':', '/', "='", '\r\n');
+// Real neighbours of a key: whitespace, punctuation, assignments, quotes, JSON escapes written out as text, control
+// characters (JSON-encoded as \u0001), ANSI colour codes and URL-encoded bytes. (A key glued to a letter or digit
+// on either side is not a key boundary; test/scrub.test.ts covers `_` and Telegram's `/bot<token>`.)
+const separator = fc.constantFrom(
+  ...[' ', '\n', ', ', '; ', '\t', ' (', ') ', '\\n', '\\t', '=', '"', ':', '/', "='", '\r\n'],
+  ...['\x01', '\x1f', '\x1b[32m', '\x1b[0m ', '\\u001b[31m', '%3D', '%20', '&token=', '\\u00e9'],
+);
 
 /** A document of filler with planted secrets; `secrets` lists what was planted. */
 const document = fc

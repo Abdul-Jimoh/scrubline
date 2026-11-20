@@ -43,6 +43,32 @@ describe('token boundaries', () => {
     });
   });
 
+  it('masks a Telegram token in its usual place, the API URL path', () => {
+    const url = `https://api.telegram.org/bot${FAKE.TELEGRAM_BOT_TOKEN}/sendMessage`;
+    expect(scrub(url).text).toBe('https://api.telegram.org/bot[TELEGRAM_BOT_TOKEN_1]/sendMessage');
+  });
+
+  it('masks keys after ANSI colour codes, raw or JSON-escaped, and after URL-encoded bytes', () => {
+    expect(scrub(`\x1b[32m${FAKE.GITHUB_TOKEN}\x1b[0m`).text).toBe('\x1b[32m[GITHUB_TOKEN_1]\x1b[0m');
+    expect(scrub(`\\u001b[1m${FAKE.AWS_KEY}`).text).toBe('\\u001b[1m[AWS_KEY_1]');
+    expect(scrub(`token%3D${FAKE.GITHUB_TOKEN}&x=1`).text).toBe('token%3D[GITHUB_TOKEN_1]&x=1');
+    expect(scrub(`Bearer%20${FAKE.OPENAI_KEY}`).text).toBe('Bearer%20[OPENAI_KEY_1]');
+  });
+
+  it('never starts a match inside a \\uXXXX escape, so JSON with control characters stays valid', () => {
+    for (const value of [FAKE.TELEGRAM_BOT_TOKEN, FAKE.EMAIL, FAKE.AWS_KEY]) {
+      const out = scrub(JSON.stringify({ m: `\x01${value}` })).text;
+      expect(JSON.parse(out).m).toMatch(/^\x01\[[A-Z_]+_1\]$/);
+    }
+    // Four hex digits followed by `@b.co` is not an email: the digits belong to the escape.
+    expect(JSON.parse(scrub(JSON.stringify({ m: '\x01@b.co' })).text)).toEqual({ m: '\x01@b.co' });
+  });
+
+  it('a lower-priority match that overlaps a key does not hide a real value inside it', () => {
+    // The email pattern first matches from `npm_…` (its local part allows `_` and `%`); found by fast-check.
+    expect(scrub(`${FAKE.NPM_TOKEN}%3D${FAKE.EMAIL}`).text).toBe('[NPM_TOKEN_1]%3D[EMAIL_1]');
+  });
+
   it('does not mask a key prefix inside a longer word', () => {
     for (const line of ['risk-assessment-for-the-quarter-2026', 'fork_test_handlesEverythingNicely', 'EURASIAN1234567890ABCDEFGH'])
       expect(scrub(line).text).toBe(line);
@@ -113,9 +139,20 @@ describe('private key blocks', () => {
     expect(scrub(`key:\n${block}\nend`).text).toBe('key:\n[PRIVATE_KEY_1]\nend');
   });
 
-  it('a PGP private key block is one finding', () => {
-    const block = j('-----BEGIN PGP ', 'PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\nlQOYBF4xyzPGPbody==\n-----END PGP ', 'PRIVATE KEY BLOCK-----');
+  it('a complete PGP block is one finding, whatever its armour lines hold', () => {
+    const block = j(
+      '-----BEGIN PGP ',
+      'PRIVATE KEY BLOCK-----\nVersion: GnuPG v1.4.11 (GNU/Linux)\nComment: Alice <alice@example.com> "work" key!\n\n',
+      'lQOYBF4xyzPGPbody==\n=Ab1c\n-----END PGP ',
+      'PRIVATE KEY BLOCK-----',
+    );
     expect(scrub(`${block}\n`).text).toBe('[PRIVATE_KEY_1]\n');
+  });
+
+  it('a complete block in JSON that escapes slashes (PHP) is one finding', () => {
+    const block = j('-----BEGIN ', 'PRIVATE KEY-----\nMIIEvQIBADANBg/kqhkiG9w0+BAQEFAASC\nab/cd/ef==\n-----END ', 'PRIVATE KEY-----');
+    const php = JSON.stringify({ key: block, next: 'kept' }).replaceAll('/', '\\/');
+    expect(JSON.parse(scrub(php).text)).toEqual({ key: '[PRIVATE_KEY_1]', next: 'kept' });
   });
 
   it('an unterminated block (a truncated paste) is masked to its end', () => {
