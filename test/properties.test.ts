@@ -11,9 +11,8 @@ const B64URL = ALNUM + '_-';
 
 const chars = (alphabet: string, min: number, max = min) =>
   fc.string({ unit: fc.constantFrom(...alphabet), minLength: min, maxLength: max });
-/** `body` characters, ending on a letter or digit as real tokens do. */
-const token = (prefix: string, alphabet: string, min: number, max = min) =>
-  fc.tuple(chars(alphabet, min - 1, max - 1), chars(ALNUM, 1)).map(([a, b]) => prefix + a + b);
+/** A prefix and a body drawn from the format's whole alphabet: real keys can end on `-` or `_`. */
+const token = (prefix: string, alphabet: string, min: number, max = min) => chars(alphabet, min, max).map((b) => prefix + b);
 const cat = (...parts: fc.Arbitrary<string>[]) => fc.tuple(...parts).map((p) => p.join(''));
 
 const b64Lines = fc.array(chars(ALNUM + '+/', 16, 64), { minLength: 1, maxLength: 4 }).map((l) => l.join('\n'));
@@ -42,8 +41,10 @@ const planted = fc.oneof(
   ),
   cat(
     chars(LOW + DIG, 1, 12).filter((l) => l !== 'git'),
+    fc.constantFrom('', '.', '+', '-', '_'),
+    chars(LOW + DIG, 0, 8),
     fc.constant('@'),
-    chars(LOW + DIG, 1, 10),
+    chars(LOW + DIG + '-', 1, 10),
     fc.constant('.'),
     chars(LOW, 2, 6),
   ),
@@ -55,7 +56,9 @@ const filler = fc.oneof(
   fc.tuple(fc.constantFrom('EMAIL', 'AWS_KEY', 'JWT', 'GITHUB_TOKEN', 'X'), fc.nat(4)).map(([k, n]) => `[${k}_${n}]`),
   fc.constantFrom('[', ']', '[EMAIL_', '_1]', '[]'),
 );
-const separator = fc.constantFrom(' ', '\n', ', ', '; ', '\t', ' (', ') ');
+// Real neighbours of a key: whitespace, punctuation, assignments, quotes, and JSON escapes written out as text.
+// (A key glued to a letter or digit on either side is not a key boundary; test/scrub.test.ts covers `_`.)
+const separator = fc.constantFrom(' ', '\n', ', ', '; ', '\t', ' (', ') ', '\\n', '\\t', '=', '"', ':', '/', "='", '\r\n');
 
 /** A document of filler with planted secrets; `secrets` lists what was planted. */
 const document = fc
@@ -105,6 +108,17 @@ describe('properties', () => {
         for (const f of findings) expect(x.slice(f.start, f.end)).toBe(map[f.placeholder]);
         const logged = JSON.stringify(findings);
         for (const s of secrets) expect(logged).not.toContain(s);
+      }),
+      runs,
+    );
+  });
+
+  it('a JSON-encoded document stays valid JSON and loses every planted secret', () => {
+    fc.assert(
+      fc.property(document, ({ text: x, secrets }) => {
+        const out = scrub(JSON.stringify({ msg: x })).text;
+        const { msg } = JSON.parse(out) as { msg: string };
+        for (const s of secrets) expect(msg).not.toContain(s);
       }),
       runs,
     );

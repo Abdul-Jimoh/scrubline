@@ -1,4 +1,5 @@
-// Every value here is fake, made up for these tests; none was ever a live credential. Each is assembled at runtime
+// No value here is a live credential. Most are carried over from an earlier tool's tests (same author); the
+// Telegram and Stripe samples follow those services' published documentation examples. Each is assembled at runtime
 // so the source never holds a complete key-shaped string for a secret scanner (or GitHub push protection) to flag.
 export const j = (...parts: string[]): string => parts.join('');
 
@@ -19,5 +20,5 @@ export const FAKE = {
   SENDGRID_KEY: j('SG.', 'ngeVfQFYQlKU0ufo8x5d1A', '.', 'TwL2iGABf9DHoTf-09kqeF8tAmbihYzrnopKc-1s5cr'),
   DIGITALOCEAN_TOKEN: j('dop_', 'v1_', '0123456789abcdef'.repeat(4)),
   TELEGRAM_BOT_TOKEN: j('123456789', ':', 'AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1'),
-  EMAIL: j('jane.doe', '@', 'example-corp.io'),
+  EMAIL: j('jane.doe', '@', 'example.com'),
 } as const;

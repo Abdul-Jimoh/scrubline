@@ -17,8 +17,40 @@ describe('every built-in detector masks its format with a typed placeholder', ()
   }
 });
 
+describe('token boundaries', () => {
+  // Each of these leaked before the boundaries stopped relying on \b (found by the pre-push verifier).
+  const cases: [string, string, string][] = [
+    ['a Google key ending in -', j('AIza', 'Sy', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6', '-'), 'GOOGLE_API_KEY'],
+    ['a Telegram token ending in -', j('123456789', ':', 'AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw', '-'), 'TELEGRAM_BOT_TOKEN'],
+    ['a 20-character GitLab token ending in -', j('glpat-', 'Xy7Zq2Wm9Rt4Lp8Kd3V', '-'), 'GITLAB_TOKEN'],
+  ];
+  for (const [name, value, kind] of cases) {
+    it(`masks ${name}, mid-text and at the end`, () => {
+      expect(scrub(`key ${value} end`).text).toBe(`key [${kind}_1] end`);
+      expect(scrub(`key ${value}`).text).toBe(`key [${kind}_1]`);
+    });
+  }
+
+  it('masks keys right after an underscore and before one', () => {
+    expect(scrub(`TOKEN_${FAKE.GITHUB_TOKEN}_x`).text).toBe('TOKEN_[GITHUB_TOKEN_1]_x');
+  });
+
+  it('masks keys inside a JSON-escaped log line, and the line stays valid JSON', () => {
+    const msg = `line1\n${FAKE.GITHUB_TOKEN}\t${FAKE.AWS_KEY}\n${FAKE.ANTHROPIC_KEY}\n${FAKE.EMAIL}\r${FAKE.JWT}`;
+    const out = scrub(JSON.stringify({ msg })).text;
+    expect(JSON.parse(out)).toEqual({
+      msg: 'line1\n[GITHUB_TOKEN_1]\t[AWS_KEY_1]\n[ANTHROPIC_KEY_1]\n[EMAIL_1]\r[JWT_1]',
+    });
+  });
+
+  it('does not mask a key prefix inside a longer word', () => {
+    for (const line of ['risk-assessment-for-the-quarter-2026', 'fork_test_handlesEverythingNicely', 'EURASIAN1234567890ABCDEFGH'])
+      expect(scrub(line).text).toBe(line);
+  });
+});
+
 describe('numbering', () => {
-  const other = j('ops', '@', 'example-corp.io');
+  const other = j('ops', '@', 'example.com');
 
   it('numbers distinct values per kind and reuses the placeholder for a repeated value', () => {
     const input = `${FAKE.EMAIL} cc ${other}; key ${FAKE.AWS_KEY}; again ${FAKE.EMAIL}`;
@@ -67,26 +99,43 @@ describe('restore', () => {
   });
 });
 
-describe('priority between overlapping formats', () => {
+describe('private key blocks', () => {
   it('an Anthropic key is not reported as an OpenAI-style key', () => {
     expect(scrub(FAKE.ANTHROPIC_KEY).text).toBe('[ANTHROPIC_KEY_1]');
   });
 
-  it('a private key block is one finding, whatever it contains', () => {
-    const block = j('-----BEGIN ', 'RSA PRIVATE KEY-----\n', FAKE.EMAIL, '\n-----END ', 'RSA PRIVATE KEY-----');
+  it('an encrypted PEM block with header lines is one finding', () => {
+    const block = j(
+      '-----BEGIN ',
+      'RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D4E5F6071\n\nMIIEpAIBAAKCAQEA\n-----END ',
+      'RSA PRIVATE KEY-----',
+    );
     expect(scrub(`key:\n${block}\nend`).text).toBe('key:\n[PRIVATE_KEY_1]\nend');
   });
 
-  it('an unterminated private key block (a truncated paste) is masked to the end', () => {
+  it('a PGP private key block is one finding', () => {
+    const block = j('-----BEGIN PGP ', 'PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\nlQOYBF4xyzPGPbody==\n-----END PGP ', 'PRIVATE KEY BLOCK-----');
+    expect(scrub(`${block}\n`).text).toBe('[PRIVATE_KEY_1]\n');
+  });
+
+  it('an unterminated block (a truncated paste) is masked to its end', () => {
     const cut = j('-----BEGIN ', 'OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUA');
     expect(scrub(`pasted: ${cut}`).text).toBe('pasted: [PRIVATE_KEY_1]');
+  });
+
+  it('a block inside JSON is masked and the JSON stays valid, with or without its END line', () => {
+    const cut = j('-----BEGIN ', 'OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUA');
+    for (const key of [FAKE.PRIVATE_KEY, cut]) {
+      const out = scrub(JSON.stringify({ key, next: 'kept' })).text;
+      expect(JSON.parse(out)).toEqual({ key: '[PRIVATE_KEY_1]', next: 'kept' });
+    }
   });
 });
 
 describe('ordinary text is kept', () => {
   const keep = [
     '',
-    'git clone git@github.com:openserv-labs/skills.git',
+    'git clone git@github.com:example-org/example-repo.git',
     'commit 9fceb02d0ae598e95dc970b74767f19372d61af8',
     'session 3f2a1b4c-1111-2222-3333-444455556666',
     'tx 0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060',

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { scrub } from '../src/index.js';
-import { j } from './fixtures.js';
+import { FAKE, j } from './fixtures.js';
 
 // Scrubline runs on untrusted text (logs, pastes), so a crafted input must not stall it. Each input here is
 // 200,000 characters. Before the fix, the email case took about 1.6 s at 32,000 characters and grew with the square
@@ -23,4 +23,17 @@ describe('scan time stays linear on crafted input', () => {
       scrub(input);
       expect(Date.now() - t).toBeLessThan(1500);
     });
+});
+
+describe('scrub time stays linear in the number of findings', () => {
+  // About 3 MB with 160,000 findings. Emails are detected after AWS keys but appear before them in the text, so
+  // each email span lands in front of every key span. Inserting spans one at a time took about 4 s at 2.6 MB.
+  it('160,000 findings in reversed priority order', () => {
+    const n = 80_000;
+    const input = `mail ${FAKE.EMAIL}\n`.repeat(n) + `key ${FAKE.AWS_KEY}\n`.repeat(n);
+    const t = Date.now();
+    const { findings } = scrub(input);
+    expect(Date.now() - t).toBeLessThan(1500);
+    expect(findings).toHaveLength(2 * n);
+  });
 });

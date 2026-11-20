@@ -12,7 +12,7 @@ One copied line can carry a live API key, a customer's email or your home folder
 values with typed, numbered placeholders, so the text still makes sense to a reader or a model:
 
 ```text
-in:  curl -H "Authorization: token ghp_…" … # contact jane.doe@example-corp.io
+in:  curl -H "Authorization: token ghp_…" … # contact jane.doe@example.com
 out: curl -H "Authorization: token [GITHUB_TOKEN_1]" … # contact [EMAIL_1]
 ```
 
@@ -61,24 +61,38 @@ console.log(restore(answer, map)); // placeholders in the model's answer become 
 | `NPM_TOKEN`, `HUGGINGFACE_TOKEN`, `SENDGRID_KEY`, `DIGITALOCEAN_TOKEN`, `TELEGRAM_BOT_TOKEN` | their published formats |
 | `EMAIL` | email addresses (an SSH remote like `git@github.com:…` is kept) |
 
-Not yet: labelled secrets (`password=…`), connection strings, phone and card numbers, IP addresses, home paths,
-high-entropy strings, custom rules, streaming and the CLI. These are tracked as issues.
+Keys are found at token boundaries: after whitespace, punctuation, `_`, quotes, or an escape such as `\n` in a
+JSON-encoded log. JSON stays valid after scrubbing.
+
+Planned, not built yet: labelled secrets (`password=…`), connection strings, phone and card numbers, IP addresses,
+home paths, high-entropy strings, custom rules, streaming and the CLI. They will be opened as issues in the backlog.
+
+## Known limits
+
+- A key glued to a letter or digit on either side (`xAKIA…`) is not treated as a key.
+- Any `git@…` address is kept, so a real mailbox named `git` is not masked.
+- A private key block without its END line is masked up to the first character a key block cannot hold (such as a
+  quote); a comment line with other characters ends the masked part early.
 
 ## How it is tested
 
+`npm run check` runs the typecheck and all tests.
+
 | Claim | Proof |
 |---|---|
-| Each format above is masked with its typed placeholder | `test/scrub.test.ts` ("every built-in detector") |
-| `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check, arbitrary Unicode and generated documents |
-| No planted secret survives | `test/properties.test.ts`: random documents of fake keys, emails and placeholder look-alikes |
-| Findings never contain the values | `test/scrub.test.ts` and `test/properties.test.ts` |
-| Scan time stays linear on crafted input | `test/performance.test.ts`: 200,000-character worst cases |
+| Each format above is masked with its typed placeholder | `test/scrub.test.ts`: "every built-in detector" |
+| Keys ending in `-`, after `_`, or inside JSON-escaped text are masked; JSON stays valid | `test/scrub.test.ts`: "token boundaries", "private key blocks" |
+| `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
+| In generated documents (fake keys of every format, emails, placeholder look-alikes, JSON-escaped separators), no planted value survives, as plain text or JSON-encoded | `test/properties.test.ts` |
+| Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
+| Scan time stays linear: crafted 200,000-character inputs and a 3 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; about 5 ms and 120 ms on an M-series laptop) |
 
 Every key in the tests is fake and is assembled at runtime, so the repository never holds a complete key-shaped string.
 
 ## Prior work
 
-The detector patterns started from a redactor in an earlier tool by the same author, split into typed detectors and rebuilt around reversible masks.
+The detector patterns, and most of the fake test values and keep-cases, started from a redactor in an earlier tool by the same author.
+Here they are split into typed detectors with explicit token boundaries and rebuilt around reversible masks.
 
 ## Licence
 

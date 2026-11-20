@@ -26,32 +26,28 @@ interface Span {
   end: number;
 }
 
-/** Index of the first span whose end is after `pos` (spans sorted and disjoint). */
-function firstEndingAfter(spans: Span[], pos: number): number {
-  let lo = 0;
-  let hi = spans.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (spans[mid]!.end <= pos) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
-/** Matches from every detector, in priority order; a match that overlaps one already taken is dropped. */
+/**
+ * Matches from every detector, in priority order; a match that overlaps one already taken is dropped. Each
+ * detector's matches arrive sorted and disjoint, so they are merged into the taken spans in one linear pass per
+ * detector (inserting one at a time was quadratic in the number of findings).
+ */
 function collect(input: string, detectors: readonly Detector[]): Span[] {
-  const spans: Span[] = [];
+  let taken: Span[] = [];
   for (const d of detectors) {
+    const merged: Span[] = [];
+    let i = 0;
     for (const m of input.matchAll(d.pattern)) {
       const start = m.index;
       const end = start + m[0].length;
       if (end === start || (d.accept && !d.accept(m[0]))) continue;
-      const i = firstEndingAfter(spans, start);
-      if (i < spans.length && spans[i]!.start < end) continue;
-      spans.splice(i, 0, { kind: d.kind, start, end });
+      while (i < taken.length && taken[i]!.end <= start) merged.push(taken[i++]!);
+      if (i < taken.length && taken[i]!.start < end) continue;
+      merged.push({ kind: d.kind, start, end });
     }
+    while (i < taken.length) merged.push(taken[i++]!);
+    taken = merged;
   }
-  return spans;
+  return taken;
 }
 
 /**
