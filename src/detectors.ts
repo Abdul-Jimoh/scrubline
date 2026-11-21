@@ -77,6 +77,49 @@ function keyBodyEnd(input: string, i: number): number {
   }
 }
 
+/** ASCII base64url characters: the alphabet of a JWT segment. */
+const B64URL_CHAR = new Uint8Array(128);
+for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-') B64URL_CHAR[c.charCodeAt(0)] = 1;
+
+const JWT_START = new RegExp(start(ALNUM), 'y');
+
+/**
+ * JWTs: `eyJ` + header, `.` + payload, `.` + signature, each segment 8 or more base64url characters. A JWT may follow
+ * `_` or `-` (`jwt_eyJ…`), so a run like `eyJ_eyJ_…` has a possible start every four characters. A regex rescans the
+ * run from each one, which is quadratic; this scan remembers where the current run ends, and after a failed start it
+ * moves past that start's first segment, which every later start in the segment shares. It stays linear.
+ */
+function* findJwts(input: string): Iterable<readonly [number, number]> {
+  let runFrom = -1;
+  let runTo = -1;
+  /** First index at or after `i` that is not base64url. */
+  const runEnd = (i: number): number => {
+    if (i >= runFrom && i <= runTo) return runTo;
+    let k = i;
+    for (; k < input.length; k++) {
+      const c = input.charCodeAt(k);
+      if (c >= 128 || !B64URL_CHAR[c]) break;
+    }
+    runFrom = i;
+    runTo = k;
+    return k;
+  };
+  for (let p = input.indexOf('eyJ'); p !== -1; ) {
+    JWT_START.lastIndex = p;
+    if (!JWT_START.test(input)) {
+      p = input.indexOf('eyJ', p + 1);
+      continue;
+    }
+    const e1 = runEnd(p + 3);
+    const e2 = input[e1] === '.' ? runEnd(e1 + 1) : -1;
+    const e3 = e2 !== -1 && input[e2] === '.' ? runEnd(e2 + 1) : -1;
+    if (e1 - p >= 11 && e2 - e1 > 8 && e3 - e2 > 8) {
+      yield [p, e3];
+      p = input.indexOf('eyJ', e3);
+    } else p = input.indexOf('eyJ', e1);
+  }
+}
+
 function* findKeyBlocks(input: string): Iterable<readonly [number, number]> {
   let footer = -2; // index of the next footer at or after the last search; -1: none left; -2: not searched yet
   let footerEnd = 0;
@@ -96,18 +139,57 @@ function* findKeyBlocks(input: string): Iterable<readonly [number, number]> {
   }
 }
 
+// EMAIL guards its start with its whole local-part class, so a long run like `a.a.a.…` has one possible start
+// instead of one per `.`; otherwise each start rescans the run and the scan is quadratic.
+// An address may not start on the letter of an escape, so in `\njane@…` it starts at `j`, not at the `n` (after
+// other characters, `DOMAIN\jane@…`, it starts right after the backslash). The local part leaves out `%`
+// (obsolete in addresses): with it, a URL-encoded run like `…%3D…%3D…@` was one long local part that every start
+// inside it rescanned. A start right after `%` is allowed unless the `%` begins a URL-encoded byte (`%3D`).
+const EMAIL_BODY = `[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}${end(ALNUM)}`;
+const EMAIL = new RegExp(
+  `${start('A-Za-z0-9._+-')}(?<!\\\\(?=[nrtfbv]|u[0-9A-Fa-f]{4}))(?<!%(?=[0-9A-Fa-f]{2}))${EMAIL_BODY}`,
+  'g',
+);
+/**
+ * An address joined to the previous one by `.`, `_`, `+` or `-` (`jane@x.com_bob@y.com`), which the start guard would
+ * block. The joining characters stay outside the mask, so the address gets the same placeholder as anywhere else.
+ */
+const EMAIL_NEXT = new RegExp(`[._+-]+(?=[A-Za-z0-9])(${EMAIL_BODY})`, 'y');
+/** `git@github.com:org/repo` is an SSH remote, not a person. */
+const SSH_REMOTE = /^git@/i;
+
+function* findEmails(input: string): Iterable<readonly [number, number]> {
+  for (EMAIL.lastIndex = 0; ; ) {
+    const m = EMAIL.exec(input);
+    if (!m) return;
+    let s = m.index;
+    let e = s + m[0].length;
+    // Tried only right after a match, so each try starts at a new place and the scan stays linear.
+    for (;;) {
+      if (!SSH_REMOTE.test(input.slice(s, e))) yield [s, e];
+      EMAIL_NEXT.lastIndex = e;
+      const n = EMAIL_NEXT.exec(input);
+      // Followed by `@` (`c@d.co@e.com`) it is not one address; leave that to the main search, as before.
+      if (!n || input[e + n[0].length] === '@') break;
+      s = e + n[0].length - n[1]!.length;
+      e += n[0].length;
+    }
+    EMAIL.lastIndex = e;
+  }
+}
+
 export const DETECTORS: readonly Detector[] = [
   { kind: 'PRIVATE_KEY', find: findKeyBlocks },
-  // JWT and EMAIL guard the start with their whole body class, so a long run like `eyJ-eyJ-…` or `a.a.a.…` has
-  // one possible start instead of one per `-` or `.`; otherwise each start rescans the run and the scan is quadratic.
-  token('JWT', `eyJ[${B64URL}]{8,}\\.[${B64URL}]{8,}\\.[${B64URL}]{8,}`, B64URL),
+  { kind: 'JWT', find: findJwts },
   token('ANTHROPIC_KEY', `sk-ant-[${B64URL}]{16,}`, ALNUM, B64URL),
   token('OPENAI_KEY', `sk-(?:proj-|svcacct-|admin-)?[${B64URL}]{20,}`, ALNUM, B64URL),
   token('GITHUB_TOKEN', `(?:gh[pousr]_[${ALNUM}]{30,}|github_pat_[${ALNUM}_]{30,})`),
   token('GITLAB_TOKEN', `glpat-[${B64URL}]{20,}`, ALNUM, B64URL),
   token('SLACK_TOKEN', `xox[abprs]-[${ALNUM}-]{10,}`, ALNUM, `${ALNUM}-`),
   token('AWS_KEY', '(?:AKIA|ASIA)[0-9A-Z]{16}'),
-  token('GOOGLE_API_KEY', `AIza[${B64URL}]{35}`, ALNUM, B64URL),
+  // Google keys and Telegram tokens have a fixed length, so only a following letter or digit makes the run something
+  // else; `_` or `-` right after (`…_prod`) still ends the key.
+  token('GOOGLE_API_KEY', `AIza[${B64URL}]{35}`),
   // Secret and restricted keys only: Stripe publishable keys (pk_) are public by design.
   token('STRIPE_KEY', `(?:(?:sk|rk)_(?:live|test)_[${ALNUM}]{16,}|whsec_[${ALNUM}]{20,})`),
   token('NPM_TOKEN', `npm_[${ALNUM}]{30,}`),
@@ -117,19 +199,7 @@ export const DETECTORS: readonly Detector[] = [
   // Telegram's API puts the token straight after `bot` in the URL path: `https://api.telegram.org/bot<token>/…`.
   regexDetector(
     'TELEGRAM_BOT_TOKEN',
-    new RegExp(`(?<![${ALNUM}]${ENDS_ESCAPE}(?<!/bot))[0-9]{8,10}:[${B64URL}]{35}${end(B64URL)}`, 'g'),
+    new RegExp(`(?<![${ALNUM}]${ENDS_ESCAPE}(?<!/bot))[0-9]{8,10}:[${B64URL}]{35}${end(ALNUM)}`, 'g'),
   ),
-  // An address may not start on the letter of an escape, so in `\njane@…` it starts at `j`, not at the `n` (after
-  // other characters, `DOMAIN\jane@…`, it starts right after the backslash). The local part leaves out `%`
-  // (obsolete in addresses): with it, a URL-encoded run like `…%3D…%3D…@` was one long local part that every start
-  // inside it rescanned. A start right after `%` is allowed unless the `%` begins a URL-encoded byte (`%3D`).
-  regexDetector(
-    'EMAIL',
-    new RegExp(
-      `${start('A-Za-z0-9._+-')}(?<!\\\\(?=[nrtfbv]|u[0-9A-Fa-f]{4}))(?<!%(?=[0-9A-Fa-f]{2}))[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}${end(ALNUM)}`,
-      'g',
-    ),
-    // `git@github.com:org/repo` is an SSH remote, not a person.
-    (m) => !/^git@/i.test(m),
-  ),
+  { kind: 'EMAIL', find: findEmails },
 ];

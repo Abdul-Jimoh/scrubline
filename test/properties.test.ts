@@ -73,9 +73,10 @@ const filler = fc.oneof(
 );
 // Real neighbours of a key: whitespace, punctuation, assignments, quotes, JSON escapes written out as text, control
 // characters (JSON-encoded as \u0001), ANSI colour codes and URL-encoded bytes. (A key glued to a letter or digit
-// on either side is not a key boundary; test/scrub.test.ts covers `_` and Telegram's `/bot<token>`.)
+// on either side is not a key boundary; test/scrub.test.ts covers Telegram's `/bot<token>`.) `_` and `-` were
+// missing here, which hid a JWT leak that Qodo found in the review of PR #1.
 const separator = fc.constantFrom(
-  ...[' ', '\n', ', ', '; ', '\t', ' (', ') ', '\\n', '\\t', '=', '"', ':', '/', "='", '\r\n'],
+  ...[' ', '\n', ', ', '; ', '\t', ' (', ') ', '\\n', '\\t', '=', '"', ':', '/', "='", '\r\n', '_', '-'],
   ...['\x01', '\x1f', '\x1b[32m', '\x1b[0m ', '\\u001b[31m', '%3D', '%20', '&token=', '\\u00e9', '\\', '%'],
 );
 

@@ -35,6 +35,30 @@ describe('token boundaries', () => {
     expect(scrub(`TOKEN_${FAKE.GITHUB_TOKEN}_x`).text).toBe('TOKEN_[GITHUB_TOKEN_1]_x');
   });
 
+  it('masks a JWT right after an underscore or a hyphen (found by Qodo in the review of PR #1)', () => {
+    expect(scrub(`jwt_${FAKE.JWT}`).text).toBe('jwt_[JWT_1]');
+    expect(scrub(`auth-${FAKE.JWT} next`).text).toBe('auth-[JWT_1] next');
+    expect(scrub(`{"id_token":"x_${FAKE.JWT}"}`).text).toBe('{"id_token":"x_[JWT_1]"}');
+    // Glued to a letter or digit it is not a token boundary, as for every other kind.
+    expect(scrub(`x${FAKE.JWT}`).text).toBe(`x${FAKE.JWT}`);
+  });
+
+  it('masks addresses joined to each other (found by the test generator after the JWT fix)', () => {
+    for (const sep of ['_', '-', '.', '+', '__']) {
+      const { text, map } = scrub(`a@b.co${sep}c@d.co and c@d.co`);
+      // The joining characters stay outside the mask, so the second address keeps one placeholder everywhere.
+      expect(text).toBe(`[EMAIL_1]${sep}[EMAIL_2] and [EMAIL_2]`);
+      expect(restore(text, map)).toBe(`a@b.co${sep}c@d.co and c@d.co`);
+    }
+    expect(scrub('a@b.co_git@github.com:org/repo').text).toBe('[EMAIL_1]_git@github.com:org/repo');
+    expect(scrub('a@b.co_c@d.co@e.com').text).toBe('[EMAIL_1]_c@[EMAIL_2]');
+  });
+
+  it('masks fixed-length keys followed by an underscore or a hyphen (found by the test generator after the JWT fix)', () => {
+    expect(scrub(`${FAKE.GOOGLE_API_KEY}_prod`).text).toBe('[GOOGLE_API_KEY_1]_prod');
+    expect(scrub(`${FAKE.TELEGRAM_BOT_TOKEN}-bot`).text).toBe('[TELEGRAM_BOT_TOKEN_1]-bot');
+  });
+
   it('masks keys inside a JSON-escaped log line, and the line stays valid JSON', () => {
     const msg = `line1\n${FAKE.GITHUB_TOKEN}\t${FAKE.AWS_KEY}\n${FAKE.ANTHROPIC_KEY}\n${FAKE.EMAIL}\r${FAKE.JWT}`;
     const out = scrub(JSON.stringify({ msg })).text;

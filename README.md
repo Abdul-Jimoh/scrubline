@@ -73,6 +73,12 @@ home paths, high-entropy strings, custom rules, streaming and the CLI. They will
 ## Known limits
 
 - A key glued to a letter or digit on either side (`xAKIA…`), other than in the cases above, is not treated as a key.
+- A token that runs straight into a JWT (`xoxb-12-eyJ….….…`) is masked as the JWT, which takes priority; a prefix
+  left too short for its own format (`xoxb-12-`) stays visible. Real tokens of these kinds contain no dots, so this
+  needs an unusual paste.
+- Values glued to each other with no separator, or to a stray `@` (`<jwt>a@b.co`, `a@b.co_c@d.co-@e.com`), can be
+  split differently from what was meant, and a fragment such as `@b.co` or a second JWT's last two segments can stay
+  visible.
 - Any `git@…` address is kept, so a real mailbox named `git` is not masked. Addresses with `%` in the local part
   are masked only from after the last `%` (from after `%XX` when the `%` is followed by two hex digits); one whose
   local part ends in `%XX` (`jane%3D@…`) is not masked at all.
@@ -97,7 +103,7 @@ home paths, high-entropy strings, custom rules, streaming and the CLI. They will
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
 | In generated documents (fake keys of every format, armoured key blocks, emails, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid | `test/properties.test.ts` |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
-| Scan time stays linear: eight crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; about 5 ms and 140–200 ms on an M-series laptop) |
+| Scan time stays linear: twelve crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; about 5 ms and 140–200 ms on an M-series laptop) |
 | A 12 MB key block with no END line is masked rather than throwing | `test/performance.test.ts`: "very large input" |
 
 Every key in the tests is fake and is assembled at runtime, so the repository never holds a complete key-shaped string.
