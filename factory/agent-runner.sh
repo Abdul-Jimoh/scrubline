@@ -60,6 +60,7 @@ log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$RUN_DIR/run.log" >&2; }
 # Text the agent wrote (on stdin), masked with Scrubline itself before it reaches a public comment or PR body. The
 # scrubber is a copy built from origin/main before the agent starts, outside every folder the agent can write.
 SCRUBBER="$WORK/scrubber/$RUN_ID"
+trap 'rm -rf "$LOCK" "$SCRUBBER"' EXIT
 scrubbed() {
   SCRUBBER_DIST="$SCRUBBER" node --input-type=module -e '
     import { readFileSync } from "node:fs";
