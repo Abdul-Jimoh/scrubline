@@ -60,7 +60,9 @@ const whole = fc.oneof(
     chars(LOW + DIG + '-', 1, 10),
     fc.constant('.'),
     chars(LOW, 2, 6),
-  ),
+  )
+    // After a bare `%`, a two-hex-digit name (`%aa@b.co`) reads as a URL-encoded byte: README "Known limits".
+    .filter((e) => !/^[0-9a-f]{2}@/.test(e)),
 );
 
 /**
@@ -70,8 +72,12 @@ const whole = fc.oneof(
 const urlWithPassword = fc
   .tuple(
     fc.constantFrom('postgres', 'postgresql', 'mongodb+srv', 'redis', 'amqp', 'https', 's3n'),
-    // The user name may be empty, or a key (an AWS key ID in an s3n:// URL).
-    fc.oneof(chars(LOW + DIG, 0, 8), cat(fc.constantFrom('AKIA', 'ASIA'), chars(UP + DIG, 16))),
+    // The user name may be empty, a key (an AWS key ID in an s3n:// URL) or an address (smtp://jane@corp.com:…).
+    fc.oneof(
+      chars(LOW + DIG, 0, 8),
+      cat(fc.constantFrom('AKIA', 'ASIA'), chars(UP + DIG, 16)),
+      cat(chars(LOW, 1, 8), fc.constant('@'), chars(LOW, 2, 8), fc.constant('.com')),
+    ),
     fc.oneof(
       chars(ALNUM + "!$&'()*+,;=~._-%@:", 12, 24),
       // A raw /, ? or # (base64, or typed by hand), which URL parsers would read as the end of the authority.

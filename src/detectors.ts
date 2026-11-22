@@ -286,24 +286,28 @@ function scanAuthority(input: string, k: number, pastPath: boolean): AuthoritySc
 }
 
 /**
- * Passwords in URLs: `scheme://user:password@host`. Only the password is masked. Trade-off: text glued to the URL by
- * punctuation a userinfo may hold (`=`, `,`, `;`) and containing a later `@` (`…@host,a@b.co`) is masked as part of
- * the password, host included (over-masking, not a leak).
+ * Passwords in URLs: `scheme://user:password@host`. Only the password is masked. Trade-off: text glued to the host by
+ * any character that does not end a URL (anything but whitespace, a quote, `<>{}|` and a backslash: `,` `'` `=` `:` …)
+ * and containing a later `@` (`url='…@db',email='jane@b.co'`) is masked as part of the password, host included; an
+ * address glued on that way loses its name into the mask and keeps its domain visible.
  *
  * A raw `/`, `?` or `#` in a password (`Pa#ss`, or base64 `ab/cd==`) ends the authority for a URL parser, but people
  * write them. When the authority has a `:` and no `@`, the scan reads on to the first `@`. Trade-offs: it does not
  * when the text between `:` and the `/`, `?` or `#` is one or more digits, which is read as a port
  * (`http://host:8080/?to=a@b.co`), or when that `:` is inside an IPv6 host (`http://[::1]:80/…`); so the password
- * `u:1234/x@host` is not masked. A password with such a character and also a raw `@` is masked only up to that `@`.
+ * `u:1234/x@host` is not masked. A password with such a character and also a raw `@`, in either order, is masked only
+ * up to one of its `@`s, and the rest stays visible.
  * Over-masking the other way: a port that is not digits, or empty, followed by an `@` later in the path
  * (`http://host:port/?to=jane@b.co`), is masked as a password up to that `@`.
  *
- * Each scan stops at the next `://`, so the search stays linear. Trade-off: a password holding `://` is not masked.
+ * Each scan stops at the next `://`, so the search stays linear. Trade-off: a password holding `://`, or starting with
+ * `//` (so that `://` follows the user name), is not masked.
  */
 /**
  * Whether the password starting at `p` is scrubbed output: a `[URL_PASSWORD_N]` comes first, after any keys masked
  * before it. A password read past its path (`[URL_PASSWORD_1]@aa&t=…@b.co`) would otherwise be read to a later `@`
- * the second time. Trade-off: a password starting with the text `[URL_PASSWORD_N]` is not masked.
+ * the second time. Trade-off: a password starting with the text `[URL_PASSWORD_N]`, alone or right after a key
+ * (`AKIA…[URL_PASSWORD_1]tail`), is not masked.
  */
 function alreadyMasked(opaque: readonly [number, number, boolean][], p: number): boolean {
   for (const [s, e, isPassword] of opaque) {
@@ -324,7 +328,8 @@ function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
     const { colon } = scan;
     const port = /^[0-9]+$/.test(input.slice(colon + 1, scan.end));
     const ipv6 = input[from] === '[' && !input.slice(from, colon).includes(']');
-    if (at === -1 && colon !== -1 && scan.atPathStart && !port && !ipv6) {
+    // `at < colon`: the `@` belongs to the user name (`jane@corp.com:ab/cd@db`), and the password still needs its own.
+    if ((at === -1 || at < colon) && colon !== -1 && scan.atPathStart && !port && !ipv6) {
       const more = scanAuthority(input, scan.end, true);
       if (more.at !== -1) {
         at = more.at;

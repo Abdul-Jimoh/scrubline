@@ -92,17 +92,19 @@ streaming and the CLI.
   those characters to be percent-encoded (`%20`, `%22`), and an encoded password is masked.
 - A raw `/`, `?` or `#` in a password is masked, except when everything between the `:` and that character is
   digits, which reads as a port (`postgres://u:1234/x@host`), or that `:` is inside an IPv6 host
-  (`http://[::1]:…`). Such a password that also holds a raw `@` is masked only up to that `@`. The other way round, a
+  (`http://[::1]:…`). Such a password that also holds a raw `@`, in either order, is masked only up to one of its
+  `@`s, and the rest stays visible. The other way round, a
   port that is not digits, or empty, followed by an `@` later in the path (`http://host:port/?to=a@b.co`), is masked
   as a password up to that `@` (over-masking).
-- A URL password starting with the text `[URL_PASSWORD_N]` (it reads as already-scrubbed output), or holding `://`,
-  is not masked.
-- A URL's password runs to the last `@` before the host ends, as URL parsers read it. Text glued to the host by
-  `,`, `;`, `=` or `:` with no space, and holding a later `@` (`…@db,jane@example.com`), is masked with the password,
-  host included; an address glued on that way loses its name into the mask and its domain stays visible.
-- A key whose own characters include `_` or `-` (Anthropic, OpenAI, GitLab, Slack, SendGrid) runs on through a `_` or
-  `-` into whatever follows. When that is another key with a `.` in it (`sk-ant-…_SG.….…`), the part after the dot
-  stays visible.
+- A URL password starting with the text `[URL_PASSWORD_N]`, alone or right after a key (it reads as
+  already-scrubbed output), holding `://`, or starting with `//`, is not masked.
+- A URL's password runs to the last `@` before the host ends, as URL parsers read it. Text glued to the host by any
+  character other than whitespace, a quote, `<`, `>`, `{`, `}`, `|` or a backslash, and holding a later `@`
+  (`url='postgres://…@db',email='jane@example.com'`), is masked with the password, host included; an address glued on
+  that way loses its name into the mask and its domain stays visible.
+- A key whose own characters include `_` or `-` (Anthropic, OpenAI, GitHub fine-grained, GitLab, Slack, SendGrid)
+  runs on through a `_` or `-` into whatever follows. When that is another key with a `.` or `:` in it
+  (`sk-ant-…_SG.….…`, `sk-proj-…_123456789:AAH…`), the part from the `.` or `:` on stays visible.
 - `user:password@host` with no `scheme://` in front (`curl -u`, some config formats) is not detected.
 - A private key block is masked from BEGIN to the next END line within 64 KB, even when the BEGIN belonged to a
   truncated paste and the END to a later block: everything in between is masked too (over-masking, not a leak).

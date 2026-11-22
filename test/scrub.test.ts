@@ -221,6 +221,15 @@ describe('passwords in URLs (issue #3)', () => {
     expect(scrub('redis://:Pa#ss@cache:6379').text).toBe('redis://:[URL_PASSWORD_1]@cache:6379');
   });
 
+  it('an address as the user name does not stop a password with a raw / or # being masked (found by the verifier)', () => {
+    const input = `postgres://${FAKE.EMAIL}:ab/cd@db/x smtp://${FAKE.EMAIL}:Pa#ss@smtp.example.com:587`;
+    const { text } = scrub(input);
+    expect(text).toBe('postgres://[EMAIL_1]:[URL_PASSWORD_1]@db/x smtp://[EMAIL_1]:[URL_PASSWORD_2]@smtp.example.com:587');
+    expect(scrub(text).findings).toEqual([]);
+    // A user name with an @ and a port is still a port.
+    expect(scrub('postgres://app@db:5432/x?e=a@b.co').findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  });
+
   it('a bracketed or placeholder user name, or a password starting with #, / or ?, still masks it (found by the verifier)', () => {
     expect(scrub('postgres://[USER_1]:ab/cd@host/x').text).toBe('postgres://[USER_1]:[URL_PASSWORD_1]@host/x');
     expect(scrub('postgres://[admin]:Pa#ss@host/x').text).toBe('postgres://[admin]:[URL_PASSWORD_1]@host/x');
@@ -278,15 +287,19 @@ describe('passwords in URLs (issue #3)', () => {
   it('known limit: a password that is all digits before a /, ? or # is read as a port; one with / and @ is cut at the @', () => {
     expect(scrub('postgres://u:1234/x@host/db').findings).toEqual([]);
     expect(scrub('postgres://u:ab/c@d@host/db').text).toBe('postgres://u:[URL_PASSWORD_1]@d@host/db');
+    // The @ before the /: the part after it stays visible too.
+    expect(scrub('postgres://u:ab@c/d@host/db').text).toBe('postgres://u:[URL_PASSWORD_1]@c/d@host/db');
   });
 
   it('known limit: a password starting with the text [URL_PASSWORD_N] is not masked (it reads as scrubbed output)', () => {
     expect(scrub('postgres://u:[URL_PASSWORD_1]ss@host/db').findings).toEqual([]);
+    expect(scrub(`postgres://u:${FAKE.AWS_KEY}[URL_PASSWORD_1]tail@host/x`).text).toBe('postgres://u:[AWS_KEY_1][URL_PASSWORD_1]tail@host/x');
     expect(scrub('postgres://u:pa[URL_PASSWORD_1]ss@host/db').text).toBe('postgres://u:[URL_PASSWORD_2][URL_PASSWORD_1][URL_PASSWORD_3]@host/db');
   });
 
-  it('known limit: a password holding :// is not masked', () => {
-    expect(scrub('postgres://app:a://b@host').findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  it('known limit: a password holding :// or starting with // is not masked', () => {
+    for (const line of ['postgres://app:a://b@host', 'postgres://app://b@host'])
+      expect(scrub(line).findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
   });
 
   it('known limit: a port that is not digits, or empty, with an @ later in the path is masked as a password', () => {
@@ -298,7 +311,10 @@ describe('passwords in URLs (issue #3)', () => {
     expect(scrub(`curl -u app:${pw}@db`).findings).toEqual([]);
   });
 
-  it('known limit: an address glued to the host by , = ; or : is masked with the password, leaving its domain', () => {
+  it('known limit: an address glued to the host by punctuation is masked with the password, leaving its domain', () => {
+    for (const glue of [';', '=', "'", '&', '+'])
+      expect(scrub(`postgres://app:${pw}@db${glue}${FAKE.EMAIL}`).text).toBe('postgres://app:[URL_PASSWORD_1]@example.com');
+    expect(scrub(`url='postgres://app:${pw}@db',email='${FAKE.EMAIL}'`).text).toBe("url='postgres://app:[URL_PASSWORD_1]@example.com'");
     const { text, map } = scrub(`postgres://app:${pw}@db,${FAKE.EMAIL}`);
     expect(text).toBe('postgres://app:[URL_PASSWORD_1]@example.com');
     expect(map['[URL_PASSWORD_1]']).toBe(`${pw}@db,jane.doe`);
@@ -312,6 +328,13 @@ describe('known limit: keys joined by a character of their own alphabet', () => 
     const sendgrid = FAKE.SENDGRID_KEY;
     // `_SG` joins the Anthropic key; `.<id>.<secret>` stays visible.
     expect(scrub(`${FAKE.ANTHROPIC_KEY}_${sendgrid}`).text).toBe(`[ANTHROPIC_KEY_1]${sendgrid.slice(2)}`);
+  });
+
+  it('the same with a Telegram token, whose : leaves its secret half visible (found by the verifier)', () => {
+    const telegram = FAKE.TELEGRAM_BOT_TOKEN;
+    const half = telegram.slice(telegram.indexOf(':'));
+    expect(scrub(`${FAKE.OPENAI_KEY}_${telegram}`).text).toBe(`[OPENAI_KEY_1]${half}`);
+    expect(scrub(`${FAKE.SLACK_TOKEN}-${telegram}`).text).toBe(`[SLACK_TOKEN_1]${half}`);
   });
 });
 
