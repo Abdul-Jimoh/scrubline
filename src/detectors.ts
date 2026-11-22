@@ -328,7 +328,10 @@ function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
     let { at, opaque } = scan;
     const { colon } = scan;
     const port = /^[0-9]+$/.test(input.slice(colon + 1, scan.end));
-    const ipv6 = input[from] === '[' && !input.slice(from, colon).includes(']');
+    // The `:` is inside an IPv6 host when a `[` before it is still open, also after a user name (`app@[::1]:5432`).
+    // A closed bracketed user name (`[admin]:`, `[USER_1]:`) is not a host. Found by Qodo in the review of PR #13.
+    const beforeColon = input.slice(from, colon);
+    const ipv6 = beforeColon.lastIndexOf('[') > beforeColon.lastIndexOf(']');
     // `at < colon`: the `@` belongs to the user name (`jane@corp.com:ab/cd@db`), and the password still needs its own.
     if ((at === -1 || at < colon) && colon !== -1 && scan.atPathStart && !port && !ipv6) {
       const more = scanAuthority(input, scan.end, true);
@@ -353,6 +356,14 @@ function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
 
 export const DETECTORS: readonly Detector[] = [
   { kind: 'PRIVATE_KEY', find: findKeyBlocks },
+  // Before JWT and the `sk-` formats: a Telegram token's random half can hold `-sk-…`, which an OpenAI-style match
+  // would take, and a JWT or key glued on by `-` or `_` would run into its digits; either left the rest of the token
+  // visible (found by the test generator). No other format here holds a `:`, so a Telegram match never cuts into one.
+  // Telegram's API puts the token straight after `bot` in the URL path: `https://api.telegram.org/bot<token>/…`.
+  regexDetector(
+    'TELEGRAM_BOT_TOKEN',
+    new RegExp(`(?<![${ALNUM}]${ENDS_ESCAPE}(?<!/bot))[0-9]{8,10}:[${B64URL}]{35}${end(ALNUM)}`, 'g'),
+  ),
   { kind: 'JWT', find: findJwts },
   token('ANTHROPIC_KEY', `sk-ant-[${B64URL}]{16,}`, ALNUM, B64URL),
   token('OPENAI_KEY', `sk-(?:proj-|svcacct-|admin-)?[${B64URL}]{20,}`, ALNUM, B64URL),
@@ -369,11 +380,6 @@ export const DETECTORS: readonly Detector[] = [
   token('HUGGINGFACE_TOKEN', `hf_[${ALNUM}]{30,}`),
   token('SENDGRID_KEY', `SG\\.[${B64URL}]{16,}\\.[${B64URL}]{16,}`, ALNUM, B64URL),
   token('DIGITALOCEAN_TOKEN', 'do[opr]_v1_[0-9a-f]{64}'),
-  // Telegram's API puts the token straight after `bot` in the URL path: `https://api.telegram.org/bot<token>/…`.
-  regexDetector(
-    'TELEGRAM_BOT_TOKEN',
-    new RegExp(`(?<![${ALNUM}]${ENDS_ESCAPE}(?<!/bot))[0-9]{8,10}:[${B64URL}]{35}${end(ALNUM)}`, 'g'),
-  ),
   // After the key formats, so a key used as a URL password keeps its own type; before EMAIL, so `user:pw@host.com`
   // is not read as the address `pw@host.com`.
   { kind: 'URL_PASSWORD', find: findUrlPasswords },

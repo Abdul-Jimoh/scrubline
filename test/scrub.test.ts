@@ -56,6 +56,11 @@ describe('token boundaries', () => {
     expect(scrub('a@b.co_c@d.co@e.com').text).toBe('[EMAIL_1]_c@[EMAIL_2]');
   });
 
+  it('masks a Telegram token whose random half holds -sk- (found by the test generator)', () => {
+    const token = j('00000000', ':', 'AAAAA-s', 'k-AAAAAAAAAAAAAAAAAAAAAAAAAA');
+    expect(scrub(`bot ${token} end`).text).toBe('bot [TELEGRAM_BOT_TOKEN_1] end');
+  });
+
   it('masks fixed-length keys followed by an underscore or a hyphen (found by the test generator after the JWT fix)', () => {
     expect(scrub(`${FAKE.GOOGLE_API_KEY}_prod`).text).toBe('[GOOGLE_API_KEY_1]_prod');
     expect(scrub(`${FAKE.TELEGRAM_BOT_TOKEN}-bot`).text).toBe('[TELEGRAM_BOT_TOKEN_1]-bot');
@@ -247,6 +252,9 @@ describe('passwords in URLs (issue #3)', () => {
       'http://localhost:8080/login?next=/x&email=a@b.co',
       'http://host:8080?to=a@b.co',
       'http://[::1]:80/x?e=a@b.co',
+      // A user name before an IPv6 host (found by Qodo in the review of PR #13).
+      'postgres://app@[::1]:5432/x?e=a@b.co',
+      'postgres://app@[fe80::1]/x?e=a@b.co',
       'https://example.com/a:b/c@d',
     ])
       expect(scrub(line).findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
@@ -330,13 +338,14 @@ describe('known limit: keys joined by a character of their own alphabet', () => 
     expect(scrub(`${FAKE.ANTHROPIC_KEY}_${sendgrid}`).text).toBe(`[ANTHROPIC_KEY_1]${sendgrid.slice(2)}`);
   });
 
-  it('the same with a Telegram token, whose : leaves its secret half visible (found by the verifier)', () => {
+  it('a Telegram token after such a key is masked whole: it is matched first (found by the verifier, fixed after)', () => {
     const telegram = FAKE.TELEGRAM_BOT_TOKEN;
-    const half = telegram.slice(telegram.indexOf(':'));
-    expect(scrub(`${FAKE.OPENAI_KEY}_${telegram}`).text).toBe(`[OPENAI_KEY_1]${half}`);
-    expect(scrub(`${FAKE.SLACK_TOKEN}-${telegram}`).text).toBe(`[SLACK_TOKEN_1]${half}`);
-    // A JWT runs on the same way.
-    expect(scrub(`${FAKE.JWT}-${telegram}`).text).toBe(`[JWT_1]${half}`);
+    expect(scrub(`${FAKE.OPENAI_KEY}_${telegram}`).text).toBe('[OPENAI_KEY_1][TELEGRAM_BOT_TOKEN_1]');
+    expect(scrub(`${FAKE.SLACK_TOKEN}-${telegram}`).text).toBe('[SLACK_TOKEN_1][TELEGRAM_BOT_TOKEN_1]');
+    expect(scrub(`${FAKE.JWT}-${telegram}`).text).toBe('[JWT_1][TELEGRAM_BOT_TOKEN_1]');
+  });
+
+  it('a JWT runs on the same way into a SendGrid key', () => {
     expect(scrub(`${FAKE.JWT}_${FAKE.SENDGRID_KEY}`).text).toBe(`[JWT_1]${FAKE.SENDGRID_KEY.slice(2)}`);
   });
 });

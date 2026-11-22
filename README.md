@@ -104,8 +104,8 @@ streaming and the CLI.
   (`url='postgres://…@db',email='jane@example.com'`), is masked with the password, host included; an address glued on
   that way loses its name into the mask and its domain stays visible.
 - A key whose own characters include `_` or `-` (JWT, Anthropic, OpenAI, GitHub fine-grained, GitLab, Slack, SendGrid)
-  runs on through a `_` or `-` into whatever follows. When that is another key with a `.` or `:` in it
-  (`sk-ant-…_SG.….…`, `sk-proj-…_123456789:AAH…`), the part from the `.` or `:` on stays visible.
+  runs on through a `_` or `-` into whatever follows. When that is a SendGrid key (`sk-ant-…_SG.….…`), the part from
+  its first `.` on stays visible. (A Telegram token after such a key is masked whole: it is matched first.)
 - `user:password@host` with no `scheme://` in front (`curl -u`, some config formats) is not detected.
 - A private key block is masked from BEGIN to the next END line within 64 KB, even when the BEGIN belonged to a
   truncated paste and the END to a later block: everything in between is masked too (over-masking, not a leak).
