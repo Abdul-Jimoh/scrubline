@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DETECTORS, restore, scrub } from '../src/index.js';
-import { FAKE, j } from './fixtures.js';
+import { AROUND, FAKE, j } from './fixtures.js';
 
 describe('every built-in detector masks its format with a typed placeholder', () => {
   it('has a fake sample for every detector', () => {
@@ -9,10 +9,12 @@ describe('every built-in detector masks its format with a typed placeholder', ()
 
   for (const [kind, value] of Object.entries(FAKE)) {
     it(kind, () => {
-      const { text, map, findings } = scrub(`before ${value} after`);
-      expect(text).toBe(`before [${kind}_1] after`);
+      const [pre, post] = AROUND[kind as keyof typeof FAKE] ?? ['', ''];
+      const { text, map, findings } = scrub(`before ${pre}${value}${post} after`);
+      expect(text).toBe(`before ${pre}[${kind}_1]${post} after`);
       expect(map).toEqual({ [`[${kind}_1]`]: value });
-      expect(findings).toEqual([{ kind, placeholder: `[${kind}_1]`, start: 7, end: 7 + value.length }]);
+      const start = 7 + pre.length;
+      expect(findings).toEqual([{ kind, placeholder: `[${kind}_1]`, start, end: start + value.length }]);
     });
   }
 });
@@ -52,6 +54,11 @@ describe('token boundaries', () => {
     }
     expect(scrub('a@b.co_git@github.com:org/repo').text).toBe('[EMAIL_1]_git@github.com:org/repo');
     expect(scrub('a@b.co_c@d.co@e.com').text).toBe('[EMAIL_1]_c@[EMAIL_2]');
+  });
+
+  it('masks a Telegram token whose random half holds -sk- (found by the test generator)', () => {
+    const token = j('00000000', ':', 'AAAAA-s', 'k-AAAAAAAAAAAAAAAAAAAAAAAAAA');
+    expect(scrub(`bot ${token} end`).text).toBe('bot [TELEGRAM_BOT_TOKEN_1] end');
   });
 
   it('masks fixed-length keys followed by an underscore or a hyphen (found by the test generator after the JWT fix)', () => {
@@ -124,6 +131,222 @@ describe('token boundaries', () => {
   it('does not mask a key prefix inside a longer word', () => {
     for (const line of ['risk-assessment-for-the-quarter-2026', 'fork_test_handlesEverythingNicely', 'EURASIAN1234567890ABCDEFGH'])
       expect(scrub(line).text).toBe(line);
+  });
+});
+
+describe('passwords in URLs (issue #3)', () => {
+  const pw = FAKE.URL_PASSWORD;
+
+  it('masks only the password, for any scheme', () => {
+    for (const scheme of ['postgres', 'postgresql', 'mysql', 'mongodb+srv', 'redis', 'amqp', 'https', 'git+ssh']) {
+      const url = `${scheme}://app:${pw}@db.internal:5432/prod?sslmode=require`;
+      expect(scrub(`DATABASE_URL=${url}`).text).toBe(`DATABASE_URL=${scheme}://app:[URL_PASSWORD_1]@db.internal:5432/prod?sslmode=require`);
+    }
+  });
+
+  it('gives the same password the same placeholder in two URLs, and restores exactly', () => {
+    const input = `primary postgres://app:${pw}@a.internal/db replica postgres://ro:${pw}@b.internal/db`;
+    const { text, map } = scrub(input);
+    expect(text).toBe('primary postgres://app:[URL_PASSWORD_1]@a.internal/db replica postgres://ro:[URL_PASSWORD_1]@b.internal/db');
+    expect(restore(text, map)).toBe(input);
+  });
+
+  it('masks a URL-encoded password whole, and one with a raw @ or : up to the last @', () => {
+    expect(scrub('mysql://root:p%40ss%3Aw0rd@localhost/app').text).toBe('mysql://root:[URL_PASSWORD_1]@localhost/app');
+    const { text, map } = scrub('redis://u:p@ss:w0rd@cache:6379');
+    expect(text).toBe('redis://u:[URL_PASSWORD_1]@cache:6379');
+    expect(map['[URL_PASSWORD_1]']).toBe('p@ss:w0rd');
+  });
+
+  it('masks a password with no user name, and not an empty one', () => {
+    expect(scrub(`redis://:${pw}@cache:6379`).text).toBe('redis://:[URL_PASSWORD_1]@cache:6379');
+    expect(scrub('redis://:@cache:6379').findings).toEqual([]);
+  });
+
+  it('does not mask a URL with no password, or a :…@ after the authority', () => {
+    for (const line of [
+      'postgres://app@db.internal/prod',
+      'https://db.internal:5432/x',
+      'https://example.com/a:b@c',
+      'https://example.com/?q=a:b@c',
+      'https://example.com?q=a:b@c',
+      'https://example.com#a:b@c',
+      'see ://a:b@c and a:b@c',
+    ])
+      // (`app@db.internal` is still masked as an address by the email detector.)
+      expect(scrub(line).findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  });
+
+  it('masks a password in JSON, including JSON that escapes slashes or non-ASCII letters, and the JSON stays valid', () => {
+    const json = JSON.stringify({ url: `postgres://app:${pw}@db/x`, back: 'postgres://app:pa\\ss@db/x', next: 'kept' });
+    expect(JSON.parse(scrub(json).text)).toEqual({
+      url: 'postgres://app:[URL_PASSWORD_1]@db/x',
+      back: 'postgres://app:[URL_PASSWORD_2]@db/x',
+      next: 'kept',
+    });
+    // Python's json.dumps writes é as \u00e9 (found by the verifier).
+    expect(scrub('{"url": "postgres://app:p\\u00e9ss@host/x"}').text).toBe('{"url": "postgres://app:[URL_PASSWORD_1]@host/x"}');
+    const php = json.replaceAll('/', '\\/');
+    expect(JSON.parse(scrub(php).text).url).toBe('postgres://app:[URL_PASSWORD_1]@db/x');
+  });
+
+  it('a key used as the password keeps its own type', () => {
+    expect(scrub(`https://x-access-token:${FAKE.GITHUB_TOKEN}@github.com/org/repo.git`).text).toBe(
+      'https://x-access-token:[GITHUB_TOKEN_1]@github.com/org/repo.git',
+    );
+  });
+
+  it('a key as the user name does not hide the password (found by the verifier)', () => {
+    // An AWS key ID and secret in an s3n:// or s3a:// URL, as Hadoop configs write them, also percent-encoded.
+    const secret = j('wJalrXUtnFEMI', '%2FK7MDENG%2F', 'bPxRfiCYEXAMPLEKEY');
+    expect(scrub(`s3n://${FAKE.AWS_KEY}:${secret}@bucket/path`).text).toBe('s3n://[AWS_KEY_1]:[URL_PASSWORD_1]@bucket/path');
+    expect(JSON.parse(scrub(JSON.stringify({ fs: `s3a://${FAKE.AWS_KEY}:${secret}@bucket` })).text)).toEqual({
+      fs: 's3a://[AWS_KEY_1]:[URL_PASSWORD_1]@bucket',
+    });
+    expect(scrub(`https://${FAKE.JWT}:${pw}@host/x`).text).toBe('https://[JWT_1]:[URL_PASSWORD_1]@host/x');
+    expect(scrub(`https://${FAKE.GITHUB_TOKEN}:${pw}@localhost/x`).text).toBe('https://[GITHUB_TOKEN_1]:[URL_PASSWORD_1]@localhost/x');
+    expect(scrub(`postgres://[USER_1]:${pw}@host/x`).text).toBe('postgres://[USER_1]:[URL_PASSWORD_1]@host/x');
+  });
+
+  it('a key inside a password keeps its type, and the rest of the password is masked around it (found by the verifier)', () => {
+    const { text, map } = scrub(`postgres://app:xx-${FAKE.GITHUB_TOKEN}@host/x and postgres://app:${FAKE.AWS_KEY}!tail@host/x`);
+    expect(text).toBe('postgres://app:[URL_PASSWORD_1][GITHUB_TOKEN_1]@host/x and postgres://app:[AWS_KEY_1][URL_PASSWORD_2]@host/x');
+    expect(map['[URL_PASSWORD_1]']).toBe('xx-');
+    expect(map['[URL_PASSWORD_2]']).toBe('!tail');
+    // A placeholder-shaped text in a password is left as typed, so restore stays exact.
+    const input = `postgres://app:pa[EMAIL_1]ss@db/x`;
+    const r = scrub(input);
+    expect(r.text).toBe('postgres://app:[URL_PASSWORD_1][EMAIL_1][URL_PASSWORD_2]@db/x');
+    expect(restore(r.text, r.map)).toBe(input);
+  });
+
+  it('masks a password holding a raw #, ? or / (found by the verifier)', () => {
+    for (const secret of ['Pa#ssw0rd', 'Pa?ss', 'ab/cd+ef==', 'a/b?c#d'])
+      expect(scrub(`mysql://root:${secret}@localhost:3306/app?x=1`).text).toBe('mysql://root:[URL_PASSWORD_1]@localhost:3306/app?x=1');
+    expect(scrub('redis://:Pa#ss@cache:6379').text).toBe('redis://:[URL_PASSWORD_1]@cache:6379');
+  });
+
+  it('an address as the user name does not stop a password with a raw / or # being masked (found by the verifier)', () => {
+    const input = `postgres://${FAKE.EMAIL}:ab/cd@db/x smtp://${FAKE.EMAIL}:Pa#ss@smtp.example.com:587`;
+    const { text } = scrub(input);
+    expect(text).toBe('postgres://[EMAIL_1]:[URL_PASSWORD_1]@db/x smtp://[EMAIL_1]:[URL_PASSWORD_2]@smtp.example.com:587');
+    expect(scrub(text).findings).toEqual([]);
+    // A user name with an @ and a port is still a port.
+    expect(scrub('postgres://app@db:5432/x?e=a@b.co').findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  });
+
+  it('a bracketed or placeholder user name, or a password starting with #, / or ?, still masks it (found by the verifier)', () => {
+    expect(scrub('postgres://[USER_1]:ab/cd@host/x').text).toBe('postgres://[USER_1]:[URL_PASSWORD_1]@host/x');
+    expect(scrub('postgres://[admin]:Pa#ss@host/x').text).toBe('postgres://[admin]:[URL_PASSWORD_1]@host/x');
+    for (const secret of ['#Secret1', '/abcSecret', '?abc'])
+      expect(scrub(`postgres://app:${secret}@db/x`).text).toBe('postgres://app:[URL_PASSWORD_1]@db/x');
+  });
+
+  it('a / in a password in JSON that escapes slashes is masked with the rest (found by the verifier)', () => {
+    const php = JSON.stringify({ u: 'postgres://app:ab/cd@db.internal/x' }).replaceAll('/', '\\/');
+    expect(JSON.parse(scrub(php).text)).toEqual({ u: 'postgres://app:[URL_PASSWORD_1]@db.internal/x' });
+  });
+
+  it('a port, an IPv6 host or a path with an address is not read as a password', () => {
+    for (const line of [
+      'http://localhost:8080/login?next=/x&email=a@b.co',
+      'http://host:8080?to=a@b.co',
+      'http://[::1]:80/x?e=a@b.co',
+      // A user name before an IPv6 host (found by Qodo in the review of PR #13).
+      'postgres://app@[::1]:5432/x?e=a@b.co',
+      'postgres://app@[fe80::1]/x?e=a@b.co',
+      'https://example.com/a:b/c@d',
+    ])
+      expect(scrub(line).findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  });
+
+  it('JSON inside a JSON string does not run one URL into the next field (found by the verifier)', () => {
+    const inner = JSON.stringify({ url: 'postgres://app@host', email: FAKE.EMAIL });
+    const out = scrub(JSON.stringify(inner)).text;
+    expect(JSON.parse(JSON.parse(out))).toEqual({ url: 'postgres://app@host', email: '[EMAIL_1]' });
+  });
+
+  it('masks the password when a key glued to the scheme claims the scheme too (found by the test generator)', () => {
+    expect(scrub(`${FAKE.OPENAI_KEY}-postgres://:${pw}@db`).text).toBe('[OPENAI_KEY_1]://:[URL_PASSWORD_1]@db');
+  });
+
+  it('a user name that is an address is masked as an email, and the password separately', () => {
+    expect(scrub(`smtp://${FAKE.EMAIL}:${pw}@mail.example.com:587`).text).toBe('smtp://[EMAIL_1]:[URL_PASSWORD_1]@mail.example.com:587');
+  });
+
+  it('scrubbing the output again finds nothing new', () => {
+    const input = `postgres://app:${pw}@db/x https://u:x${FAKE.GITHUB_TOKEN}@h postgres://u:p@h,${FAKE.EMAIL} ${j(
+      // Found by the test generator: a password read past its path, then a key and a later @.
+      'postgres://:aaaa/AAAAAAAA@aa&token=',
+      FAKE.JWT,
+      '-a@a.aa',
+    )} postgres://app:hunter2@db,[URL_PASSWORD_1],${FAKE.EMAIL} x://u:pw@h[URL_PASSWORD_1]b@c.co`;
+    expect(scrub(scrub(input).text).findings).toEqual([]);
+  });
+
+  // Known limits (README): the trade-offs named in findUrlPasswords, pinned here.
+  it('known limit: a password holding whitespace, a control character, a quote, <>`{}| or a backslash is not masked', () => {
+    for (const ch of [' ', '\t', '\x01', '"', '<', '>', '`', '{', '}', '|', '\\q', '\x7f'])
+      expect(scrub(`postgres://app:pa${ch}ss@db/x`).findings).toEqual([]);
+    // A quote in JSON-encoded text, written \".
+    expect(scrub(JSON.stringify({ u: 'postgres://app:pa"ss@db/x' })).findings).toEqual([]);
+  });
+
+  it('known limit: a password that is all digits before a /, ? or # is read as a port; one with / and @ is cut at the @', () => {
+    expect(scrub('postgres://u:1234/x@host/db').findings).toEqual([]);
+    expect(scrub('postgres://u:ab/c@d@host/db').text).toBe('postgres://u:[URL_PASSWORD_1]@d@host/db');
+    // The @ before the /: the part after it stays visible too.
+    expect(scrub('postgres://u:ab@c/d@host/db').text).toBe('postgres://u:[URL_PASSWORD_1]@c/d@host/db');
+  });
+
+  it('known limit: a password starting with the text [URL_PASSWORD_N] is not masked (it reads as scrubbed output)', () => {
+    expect(scrub('postgres://u:[URL_PASSWORD_1]ss@host/db').findings).toEqual([]);
+    expect(scrub(`postgres://u:${FAKE.AWS_KEY}[URL_PASSWORD_1]tail@host/x`).text).toBe('postgres://u:[AWS_KEY_1][URL_PASSWORD_1]tail@host/x');
+    expect(scrub('postgres://u:pa[URL_PASSWORD_1]ss@host/db').text).toBe('postgres://u:[URL_PASSWORD_2][URL_PASSWORD_1][URL_PASSWORD_3]@host/db');
+  });
+
+  it('known limit: a password holding :// or starting with // is not masked', () => {
+    for (const line of ['postgres://app:a://b@host', 'postgres://app://b@host'])
+      expect(scrub(line).findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  });
+
+  it('known limit: a port that is not digits, or empty, with an @ later in the path is masked as a password', () => {
+    expect(scrub('http://host:port/path?to=a@b.co').text).toBe('http://host:[URL_PASSWORD_1]@b.co');
+    expect(scrub('http://host:/path?to=a@b.co').text).toBe('http://host:[URL_PASSWORD_1]@b.co');
+  });
+
+  it('known limit: user:password@host with no scheme is not detected', () => {
+    expect(scrub(`curl -u app:${pw}@db`).findings).toEqual([]);
+  });
+
+  it('known limit: an address glued to the host by punctuation is masked with the password, leaving its domain', () => {
+    for (const glue of [';', '=', "'", '&', '+'])
+      expect(scrub(`postgres://app:${pw}@db${glue}${FAKE.EMAIL}`).text).toBe('postgres://app:[URL_PASSWORD_1]@example.com');
+    expect(scrub(`url='postgres://app:${pw}@db',email='${FAKE.EMAIL}'`).text).toBe("url='postgres://app:[URL_PASSWORD_1]@example.com'");
+    const { text, map } = scrub(`postgres://app:${pw}@db,${FAKE.EMAIL}`);
+    expect(text).toBe('postgres://app:[URL_PASSWORD_1]@example.com');
+    expect(map['[URL_PASSWORD_1]']).toBe(`${pw}@db,jane.doe`);
+    // Found by the test generator.
+    expect(scrub('postgres://:AAAAAAAAAAAA@aa:a@a.aa ').text).toBe('postgres://:[URL_PASSWORD_1]@a.aa ');
+  });
+});
+
+describe('known limit: keys joined by a character of their own alphabet', () => {
+  it('a key that may hold _ runs on through it into the next key, leaving that key\'s tail visible (found by the test generator)', () => {
+    const sendgrid = FAKE.SENDGRID_KEY;
+    // `_SG` joins the Anthropic key; `.<id>.<secret>` stays visible.
+    expect(scrub(`${FAKE.ANTHROPIC_KEY}_${sendgrid}`).text).toBe(`[ANTHROPIC_KEY_1]${sendgrid.slice(2)}`);
+  });
+
+  it('a Telegram token after such a key is masked whole: it is matched first (found by the verifier, fixed after)', () => {
+    const telegram = FAKE.TELEGRAM_BOT_TOKEN;
+    expect(scrub(`${FAKE.OPENAI_KEY}_${telegram}`).text).toBe('[OPENAI_KEY_1][TELEGRAM_BOT_TOKEN_1]');
+    expect(scrub(`${FAKE.SLACK_TOKEN}-${telegram}`).text).toBe('[SLACK_TOKEN_1][TELEGRAM_BOT_TOKEN_1]');
+    expect(scrub(`${FAKE.JWT}-${telegram}`).text).toBe('[JWT_1][TELEGRAM_BOT_TOKEN_1]');
+  });
+
+  it('a JWT runs on the same way into a SendGrid key', () => {
+    expect(scrub(`${FAKE.JWT}_${FAKE.SENDGRID_KEY}`).text).toBe(`[JWT_1]${FAKE.SENDGRID_KEY.slice(2)}`);
   });
 });
 

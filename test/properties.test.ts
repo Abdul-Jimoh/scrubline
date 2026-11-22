@@ -30,8 +30,8 @@ const armour = fc
   )
   .map((lines) => lines.map((l) => `${l}\n`).join(''));
 
-/** One generator per built-in format. */
-const planted = fc.oneof(
+/** One generator per built-in format whose whole match is the secret. */
+const whole = fc.oneof(
   cat(fc.constantFrom('AKIA', 'ASIA'), chars(UP + DIG, 16)),
   token('ghp_', ALNUM, 36),
   token('github_pat_', ALNUM + '_', 60, 82),
@@ -60,7 +60,42 @@ const planted = fc.oneof(
     chars(LOW + DIG + '-', 1, 10),
     fc.constant('.'),
     chars(LOW, 2, 6),
-  ),
+  )
+    // After a bare `%`, a two-hex-digit name (`%aa@b.co`) reads as a URL-encoded byte: README "Known limits".
+    .filter((e) => !/^[0-9a-f]{2}@/.test(e)),
+);
+
+/**
+ * A URL with a password, which is the only part masked. The password holds what URL parsers accept raw in a userinfo,
+ * `@` and `:` included; the user name may be empty.
+ */
+const urlWithPassword = fc
+  .tuple(
+    fc.constantFrom('postgres', 'postgresql', 'mongodb+srv', 'redis', 'amqp', 'https', 's3n'),
+    // The user name may be empty, a key (an AWS key ID in an s3n:// URL) or an address (smtp://jane@corp.com:…).
+    fc.oneof(
+      chars(LOW + DIG, 0, 8),
+      cat(fc.constantFrom('AKIA', 'ASIA'), chars(UP + DIG, 16)),
+      cat(chars(LOW, 1, 8), fc.constant('@'), chars(LOW, 2, 8), fc.constant('.com')),
+    ),
+    fc.oneof(
+      chars(ALNUM + "!$&'()*+,;=~._-%@:", 12, 24),
+      // A raw /, ? or # (base64, or typed by hand), which URL parsers would read as the end of the authority.
+      cat(chars(LOW, 4, 8), fc.constantFrom('/', '?', '#'), chars(ALNUM + '/?#+=', 8, 16)),
+    ),
+    chars(LOW, 2, 10),
+    fc.constantFrom('', '.internal', '.example.com'),
+    fc.constantFrom('', ':5432', '/db', ':6379/0?ssl=true'),
+  )
+  .map(([scheme, user, pw, host, domain, rest]) => {
+    const head = `${scheme}://${user}:`;
+    return [`${head}${pw}@${host}${domain}${rest}`, pw, head.length] as const;
+  });
+
+/** `[text, secret, offset]`: what is planted, the part of it that must not survive, and where that part starts. */
+const planted = fc.oneof(
+  { arbitrary: whole.map((s) => [s, s, 0] as const), weight: 17 },
+  { arbitrary: urlWithPassword, weight: 2 },
 );
 
 /** Text that must survive: words, punctuation, and placeholder-shaped literals that could collide with real masks. */
@@ -80,13 +115,29 @@ const separator = fc.constantFrom(
   ...['\x01', '\x1f', '\x1b[32m', '\x1b[0m ', '\\u001b[31m', '%3D', '%20', '&token=', '\\u00e9', '\\', '%'],
 );
 
-/** A document of filler with planted secrets; `secrets` lists what was planted. */
-const document = fc
-  .array(fc.tuple(fc.oneof(planted.map((s) => ({ s })), filler.map((f) => ({ f }))), separator), { maxLength: 25 })
-  .map((parts) => ({
-    text: parts.map(([p, sep]) => ('s' in p ? p.s : p.f) + sep).join(''),
-    secrets: parts.flatMap(([p]) => ('s' in p ? [p.s] : [])),
-  }));
+/**
+ * Separators no key or URL can run on through. Joined by `_`, `-`, `:`, `=` or `%`, which a key's or a userinfo's own
+ * characters include, a value can take the start of the next one with it (README "Known limits").
+ */
+const boundary = fc.constantFrom(' ', '\n', ', ', '; ', '\t', ' (', ') ', '\\n', '"', '\r\n', '\x01', '\x1b[0m ', '\\u001b[31m');
+
+/** A document of filler with planted secrets; `secrets` lists what was planted, `at` where each one starts. */
+const documentWith = (sep: fc.Arbitrary<string>) => fc
+  .array(fc.tuple(fc.oneof(planted.map((s) => ({ s })), filler.map((f) => ({ f }))), sep), { maxLength: 25 })
+  .map((parts) => {
+    let text = '';
+    const secrets: string[] = [];
+    const at: number[] = [];
+    for (const [p, sep] of parts) {
+      if ('s' in p) {
+        secrets.push(p.s[1]);
+        at.push(text.length + p.s[2]);
+      }
+      text += ('s' in p ? p.s[0] : p.f) + sep;
+    }
+    return { text, secrets, at };
+  });
+const document = documentWith(separator);
 
 const runs = { numRuns: 500 };
 
@@ -116,6 +167,21 @@ describe('properties', () => {
       fc.property(document, ({ text: x, secrets }) => {
         const { text } = scrub(x);
         for (const s of secrets) expect(text).not.toContain(s);
+      }),
+      runs,
+    );
+  });
+
+  it('every character of every planted secret is inside a mask, when secrets are separated by a boundary', () => {
+    // Stricter than the test above: a secret split into a visible part and a masked part passes that one.
+    fc.assert(
+      fc.property(documentWith(boundary), ({ text: x, secrets, at }) => {
+        const { findings } = scrub(x);
+        const masked = new Uint8Array(x.length);
+        for (const f of findings) masked.fill(1, f.start, f.end);
+        secrets.forEach((s, i) => {
+          for (let k = at[i]!; k < at[i]! + s.length; k++) expect(masked[k], `${JSON.stringify(s)} at ${k - at[i]!}`).toBe(1);
+        });
       }),
       runs,
     );
