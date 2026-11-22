@@ -57,12 +57,14 @@ mkdir -p "$RUN_DIR"
 # Log lines go to the run log and stderr, never stdout, so they cannot mix into a captured value.
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$RUN_DIR/run.log" >&2; }
 
-# Text the agent wrote (on stdin), masked with Scrubline itself before it reaches a public comment or PR body.
+# Text the agent wrote (on stdin), masked with Scrubline itself before it reaches a public comment or PR body. The
+# scrubber is a copy built from origin/main before the agent starts, outside every folder the agent can write.
+SCRUBBER="$WORK/scrubber/$RUN_ID"
 scrubbed() {
-  (cd "$WT" 2>/dev/null && node --input-type=module -e '
+  SCRUBBER_DIST="$SCRUBBER" node --input-type=module -e '
     import { readFileSync } from "node:fs";
-    const { scrub } = await import(process.cwd() + "/dist/index.js");
-    process.stdout.write(scrub(readFileSync(0, "utf8")).text);') 2>/dev/null ||
+    const { scrub } = await import(process.env.SCRUBBER_DIST + "/index.js");
+    process.stdout.write(scrub(readFileSync(0, "utf8")).text);' 2>/dev/null ||
     echo "_(not shown: it could not be scrubbed)_"
 }
 
@@ -83,11 +85,10 @@ Run \`$RUN_ID\`. $where Remove \`agent-needs-help\` and \`agent-working\` to rel
 }
 trap 'needs_help "the run was interrupted"' INT TERM
 
-# Fills {{NAME}} in a prompt template from the shell variables of the same name. A missing or empty template stops
-# the run rather than sending the agent an empty prompt.
+# Fills {{NAME}} in a prompt template from the shell variables of the same name; fails on a missing or empty template.
 render() {
   local text
-  [ -s "$1" ] || needs_help "prompt template $(basename "$1") is missing"
+  [ -s "$1" ] || return 1
   text=$(cat "$1")
   for name in ISSUE BRANCH RUN_DIR ATTEMPT MAX_ATTEMPTS PREV PR_URL SHA ROUND MAX_ROUNDS; do
     text=${text//\{\{$name\}\}/${!name:-}}
@@ -95,10 +96,19 @@ render() {
   printf '%s' "$text"
 }
 
+# Renders template $1 and runs the agent on it, writing its result to $2. A missing template stops the run rather
+# than sending the agent an empty prompt.
+run_agent() {
+  local prompt
+  prompt=$(render "$PROMPTS/$1") || needs_help "prompt template $1 is missing"
+  agent "$prompt" "$2"
+}
+
 # Runs Claude Code headless in the worktree with the rendered prompt. Settings hooks still apply (no --bare).
 # The tool list keeps the agent to editing, the project's checks and local git; it cannot run node, push, or touch
-# issues and PRs. `npm run check` runs scripts the agent can edit, so this limits mistakes, not a determined agent:
-# the ticket text must be the owner's, and the runner posts nothing the agent wrote without scrubbing it.
+# issues and PRs. `npm run check`, `npm test` and vitest run code the agent can edit, so this limits mistakes, not a
+# determined agent: the ticket text must be the owner's, and the runner posts nothing the agent wrote without
+# scrubbing it with a scrubber the agent cannot change.
 agent() {
   local prompt="$1" out="$2"
   [ -n "$prompt" ] || needs_help "empty prompt"
@@ -111,7 +121,7 @@ agent() {
         'Bash(npm run check)' 'Bash(npm run typecheck)' 'Bash(npm test*)' 'Bash(npx vitest *)' 'Bash(npx tsc *)' \
         'Bash(git status*)' 'Bash(git diff*)' 'Bash(git log*)' 'Bash(git show*)' 'Bash(git add *)' \
         'Bash(git commit -m *)' 'Bash(gh issue view *)' 'Bash(ls *)' \
-      --disallowedTools 'Bash(git push*)' 'Bash(git commit --amend*)' 'Bash(git reset*)' 'Bash(git rebase*)' \
+      --disallowedTools 'Bash(git push*)' 'Bash(git commit --amend*)' 'Bash(git commit * --amend*)' 'Bash(git reset*)' 'Bash(git rebase*)' \
         'Bash(git checkout*)' 'Bash(gh pr *)' 'Bash(gh issue comment*)' 'Bash(gh issue edit*)' 'Bash(node *)' \
         'WebFetch' 'WebSearch' \
       --output-format json >"$out" 2>"$out.err")
@@ -168,16 +178,17 @@ git -C "$SRC" fetch -q origin main || needs_help "git fetch failed"
 git -C "$SRC" worktree remove --force "$WT" 2>/dev/null
 git -C "$SRC" worktree add -q -B "$BRANCH" "$WT" origin/main || needs_help "could not create the worktree"
 (cd "$WT" && npm ci --silent && npm run build --silent) >"$RUN_DIR/npm-ci.log" 2>&1 || needs_help "npm ci or the build failed"
+mkdir -p "$SCRUBBER" && cp -R "$WT/dist/." "$SCRUBBER/" || needs_help "could not copy the scrubber"
 
 # --- Implement, with a retry limit ------------------------------------------------------------------------------
 ATTEMPT=1
-agent "$(render "$PROMPTS/implement.md")" "$RUN_DIR/agent-implement.json"
+run_agent implement.md "$RUN_DIR/agent-implement.json"
 until checks_pass "$ATTEMPT"; do
   [ -s "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
   [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] && needs_help "checks still failing after $MAX_ATTEMPTS attempts"
   PREV=$ATTEMPT
   ATTEMPT=$((ATTEMPT + 1))
-  agent "$(render "$PROMPTS/fix-checks.md")" "$RUN_DIR/agent-fix-checks-$ATTEMPT.json"
+  run_agent fix-checks.md "$RUN_DIR/agent-fix-checks-$ATTEMPT.json"
 done
 [ -s "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
 
@@ -218,7 +229,7 @@ while :; do
   [ "$ROUND" -ge "$MAX_ROUNDS" ] && needs_help "$count Qodo finding(s) still open after $MAX_ROUNDS fix rounds"
   ROUND=$((ROUND + 1))
   echo "$open" >"$RUN_DIR/findings-$ROUND.json"
-  agent "$(render "$PROMPTS/fix-review.md")" "$RUN_DIR/agent-fix-review-$ROUND.json"
+  run_agent fix-review.md "$RUN_DIR/agent-fix-review-$ROUND.json"
   checks_pass "review-$ROUND" || needs_help "checks failed after review fix round $ROUND"
   [ "$(git -C "$WT" rev-parse HEAD)" = "$SHA" ] && needs_help "the agent changed nothing for $count open finding(s); see its report"
   push || needs_help "git push failed"

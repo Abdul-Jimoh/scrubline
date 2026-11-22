@@ -9,6 +9,11 @@ SRC=$(cd "$(dirname "$0")/.." && pwd)
 WORK=${SCRUBLINE_WORK:-$HOME/.scrubline-factory}
 INTERVAL=${INTERVAL:-900}
 
+if [ "${1:-}" != "--remove" ]; then
+  case "$SRC" in /private/tmp/* | /tmp/* | /private/var/folders/* | /var/folders/*)
+    echo "run this from your clone of the repo, not a temporary folder" >&2; exit 1 ;;
+  esac
+fi
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 if [ "${1:-}" = "--remove" ]; then
   rm -f "$PLIST"
@@ -20,7 +25,6 @@ fi
 # script again after changing the runner or its prompts.
 # Values go into XML.
 xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
-case "$SRC" in /private/tmp/* | /tmp/*) echo "run this from your clone of the repo, not a temporary folder" >&2; exit 1 ;; esac
 
 mkdir -p "$WORK" "$(dirname "$PLIST")"
 rm -rf "$WORK/factory"
