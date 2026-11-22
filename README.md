@@ -56,8 +56,8 @@ pbpaste | node dist/cli.js restore --map ~/.scrubline/map.json
 
 `scrubline [file] [--map <file>] [--summary]` masks a file or stdin to stdout; every other byte is left as it was.
 `--map` keeps the originals in a JSON file (mode 0600) and adds to it on each run, so a value keeps its placeholder
-across pastes. Runs that share a map take turns (a `.lock` file next to it holds the running process's id; a lock left by a run that
-was stopped is taken over), a symlinked map is written through to its target, and placeholder text you typed yourself is recorded as standing for itself, so no later run gives it a value.
+across pastes. Runs that share a map take turns (a `.lock` file next to it holds the running process's id and start time; a lock left
+by a run that was stopped is taken over, and a paused run that lost its lock writes nothing), a symlinked map is written through to its target, and placeholder text you typed yourself is recorded as standing for itself, so no later run gives it a value.
 `--summary` prints a count per kind to stderr. `scrubline restore [file] --map <file>` puts the originals back.
 Errors exit with code 2 and never show input text, map values, arguments or file names; a reader that stops early
 (`| head`) is not an error. From code, the same is `scrub(text, { map })`.

@@ -179,6 +179,51 @@ describe('scrubline (issue #4)', () => {
     expect(readdirSync(dir).filter((f) => f.includes('.lock'))).toEqual([]);
   });
 
+  const startedAt = (pid: number) => spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+
+  it('a lock whose process id was reused by another process is taken over (found by Qodo in the review of PR #15)', () => {
+    const map = join(tmp(), 'map.json');
+    // This test process is alive, but it is not the process that wrote the lock: the start time differs.
+    writeFileSync(`${map}.lock`, `${process.pid} Mon Jan  1 00:00:00 2001\n`);
+    const t = Date.now();
+    expect(cli(['--map', map], FAKE.EMAIL)).toMatchObject({ code: 0, stdout: '[EMAIL_1]' });
+    expect(Date.now() - t).toBeLessThan(5000);
+  });
+
+  it('a live holder is waited for however old its lock is, as a paused run would be (found by Qodo in the review of PR #15)', async () => {
+    const map = join(tmp(), 'map.json');
+    writeFileSync(`${map}.lock`, `${process.pid} ${startedAt(process.pid)}\n`);
+    const old = new Date(Date.now() - 60 * 60_000);
+    utimesSync(`${map}.lock`, old, old);
+    const pending = cliAsync(['--map', map], FAKE.EMAIL);
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(readdirSync(dirname(map))).toEqual(['map.json.lock']);
+    rmSync(`${map}.lock`);
+    expect(await pending).toMatchObject({ code: 0, stdout: '[EMAIL_1]' });
+  });
+
+  it('a run that lost its lock while paused writes nothing (found by Qodo in the review of PR #15)', async () => {
+    const dir = tmp();
+    const map = join(dir, 'map.json');
+    writeFileSync(map, JSON.stringify({ '[EMAIL_1]': other }));
+    const child = spawn(process.execPath, [CLI, '--map', map], { cwd: dir });
+    let stderr = '';
+    child.stderr.on('data', (d) => (stderr += d));
+    const done = new Promise<number | null>((r) => child.on('close', r));
+    // Big enough that the run is still scrubbing when it is paused.
+    child.stdin.end(`${FAKE.EMAIL}\n`.repeat(1_500_000));
+    for (let i = 0; i < 400 && !readdirSync(dir).includes('map.json.lock'); i++) await new Promise((r) => setTimeout(r, 10));
+    child.kill('SIGSTOP');
+    // Meanwhile another run takes the lock over and writes the map.
+    writeFileSync(`${map}.lock`, `${process.pid} ${startedAt(process.pid)}\n`);
+    writeFileSync(map, JSON.stringify({ '[EMAIL_1]': other, '[EMAIL_2]': 'newer' }));
+    child.kill('SIGCONT');
+    expect(await done).toBe(2);
+    expect(stderr).toContain('took over the map while this one was paused; nothing was written');
+    expect(JSON.parse(readFileSync(map, 'utf8'))).toEqual({ '[EMAIL_1]': other, '[EMAIL_2]': 'newer' });
+    rmSync(`${map}.lock`);
+  }, 30_000);
+
   it('a lock held by a live run is waited for, not taken over', async () => {
     const map = join(tmp(), 'map.json');
     writeFileSync(`${map}.lock`, `${process.pid}\n`); // this test process, which is alive

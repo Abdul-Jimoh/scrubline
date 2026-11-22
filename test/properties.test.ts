@@ -211,6 +211,18 @@ describe('properties', () => {
     );
   });
 
+  it('with an earlier map, restore gives the input back with the map\'s placeholders filled in', () => {
+    // A follow-up paste: placeholders from the earlier map stand for their values (README "Behaviour").
+    fc.assert(
+      fc.property(document, document, ({ text: first }, { text: x }) => {
+        const earlier = scrub(first).map;
+        const { text, map } = scrub(x, { map: earlier });
+        expect(restore(text, map)).toBe(restore(x, earlier));
+      }),
+      runs,
+    );
+  });
+
   it('scrubbing twice finds nothing new', () => {
     fc.assert(
       fc.property(document, ({ text: x }) => {

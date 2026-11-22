@@ -6,6 +6,7 @@
  * quotes the text it failed on, and `scrubline "$(pbpaste)"` passes the clipboard as a file name, so errors say what
  * failed, never with what.
  */
+import { spawnSync } from 'node:child_process';
 import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { restore, scrub, type ScrubMap } from './scrub.js';
@@ -134,53 +135,72 @@ function mapTarget(file: string): string {
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /**
- * How old a lock may be before it counts as stale whatever it holds. No run holds the map this long: Node strings stop
- * near 512 MB, which scrubs in under a minute.
+ * How old a lock whose holder cannot be identified may be before it counts as stale. No run holds the map this long:
+ * Node strings stop near 512 MB, which scrubs in under a minute.
  */
 const LOCK_MAX_AGE_MS = 10 * 60_000;
 /** How long an empty or unreadable lock is given to get its process id (a run writes it right after creating it). */
 const LOCK_WRITE_GRACE_MS = 5_000;
 
+/** When process `pid` started, as `ps` prints it, or '' where `ps` is not available. */
+function startedAt(pid: number): string {
+  const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : '';
+}
+
+/** This run's lock content: its process id and start time, so a later process that reuses the id is told apart. */
+const ownLock = () => `${process.pid} ${startedAt(process.pid)}\n`;
+
 /**
  * Whether `lock` (as stat'ed in `info`) may still belong to a live run. It does not when its process is gone (Ctrl-C,
- * `kill -9`), belongs to another user (EPERM: a reused id, such as after a reboot), when it holds no process id after
- * the grace period (a run stopped between creating and writing it), or when it is older than any run takes.
+ * `kill -9`), belongs to another user (EPERM), started at another time than the lock records (a reused id: a
+ * container's `node` often gets the same low id on every start), or when it holds no process id after the grace
+ * period (a run stopped between creating and writing it). A live holder is waited for however long it holds the lock,
+ * also when it is paused (Ctrl-Z, a sleeping laptop): only a lock whose holder cannot be identified expires by age.
  */
 function holderAlive(lock: string, info: { mtimeMs: number }): boolean {
   const age = Date.now() - info.mtimeMs;
-  if (age > LOCK_MAX_AGE_MS) return false;
-  let pid = Number.NaN;
+  let text = '';
   try {
-    pid = Number(readFileSync(lock, 'utf8').trim());
+    text = readFileSync(lock, 'utf8').trim();
   } catch {
     // Gone or unreadable: decided by age below.
   }
+  const space = text.indexOf(' ');
+  const pid = Number(space === -1 ? text : text.slice(0, space));
+  const recorded = space === -1 ? '' : text.slice(space + 1);
   if (!Number.isInteger(pid) || pid <= 0) return age < LOCK_WRITE_GRACE_MS;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== 'ESRCH' && (e as NodeJS.ErrnoException).code !== 'EPERM';
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH' || code === 'EPERM') return false;
   }
+  const now = recorded ? startedAt(pid) : '';
+  if (recorded && now) return now === recorded;
+  return age < LOCK_MAX_AGE_MS;
 }
 
-/** A takeover guard older than this was left by a run stopped inside its few-microsecond takeover. */
+/** A takeover guard older than this, whose process is gone, was left by a run stopped inside its takeover. */
 const GUARD_MAX_AGE_MS = 10_000;
 
 /**
  * Removes `lock` if it is still stale, holding `<lock>.takeover` while it checks and removes. Without the guard, a
  * waiter could judge the old lock stale, pause, and then remove the fresh lock another waiter had made meanwhile;
  * with it, the check and the removal happen with no other takeover in between, and removing is the only way the lock
- * path is freed, so a live run's lock is never removed. Trade-off: a guard left by a run stopped inside it blocks
- * takeovers for ten seconds, and two runs could then both remove it at that moment.
+ * path is freed, so a live run's lock is never removed. Trade-off: a guard left by a run killed inside its takeover
+ * (a few microseconds) blocks takeovers for ten seconds; two waiters could then both remove it at the same moment.
+ * A run also checks it still holds the lock before it writes the map (`stillHeld`), so even then no map is
+ * overwritten by a run that lost its lock.
  */
 function takeOver(lock: string): void {
   const guard = `${lock}.takeover`;
   try {
-    writeFileSync(guard, `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+    writeFileSync(guard, ownLock(), { flag: 'wx', mode: 0o600 });
   } catch {
     try {
-      if (Date.now() - lstatSync(guard).mtimeMs > GUARD_MAX_AGE_MS) rmSync(guard, { force: true });
+      const info = lstatSync(guard);
+      if (Date.now() - info.mtimeMs > GUARD_MAX_AGE_MS && !holderAlive(guard, info)) rmSync(guard, { force: true });
     } catch {
       // Released meanwhile.
     }
@@ -195,11 +215,23 @@ function takeOver(lock: string): void {
   }
 }
 
+/** Set while this run holds a map lock: the lock's path and the content this run wrote to it. */
+let held: { lock: string; mine: string } | undefined;
+
+/** Whether this run still holds its lock. It may not, if it was paused long enough to be judged gone. */
+function stillHeld(): boolean {
+  try {
+    return held !== undefined && readFileSync(held.lock, 'utf8') === held.mine;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Runs `fn` holding `<map>.lock`, so two runs sharing a map cannot both number from the same old map and then
  * overwrite each other's entries (a placeholder would restore to another run's value). The lock holds the run's
- * process id, so a lock left by a run that was stopped (Ctrl-C, `kill -9`) is taken over by the next run. A run waits
- * while the holder is alive, up to five minutes, and removes the lock only while it still holds its own id.
+ * process id and start time, so a lock left by a run that was stopped (Ctrl-C, `kill -9`) is taken over by the next
+ * run. A run waits while the holder is alive, up to five minutes, and removes the lock only while it still holds it.
  */
 function withLock<T>(target: string, fn: () => T): T {
   const lock = `${target}.lock`;
@@ -208,7 +240,7 @@ function withLock<T>(target: string, fn: () => T): T {
   } catch {
     throw new UsageError('cannot write the map file');
   }
-  const mine = `${process.pid}\n`;
+  const mine = ownLock();
   for (const start = Date.now(); ; sleep(25)) {
     try {
       writeFileSync(lock, mine, { flag: 'wx', mode: 0o600 });
@@ -228,14 +260,12 @@ function withLock<T>(target: string, fn: () => T): T {
       if (Date.now() - start > LOCK_WAIT_MS) throw new UsageError('the map file is still in use by another scrubline run');
     }
   }
+  held = { lock, mine };
   try {
     return fn();
   } finally {
-    try {
-      if (readFileSync(lock, 'utf8') === mine) rmSync(lock, { force: true });
-    } catch {
-      // Already gone.
-    }
+    if (stillHeld()) rmSync(lock, { force: true });
+    held = undefined;
   }
 }
 
@@ -250,6 +280,16 @@ function writeMap(target: string, map: ScrubMap): void {
   try {
     for (const name of readdirSync(dir)) if (stale.test(name)) rmSync(join(dir, name), { force: true });
     writeFileSync(tmp, `${JSON.stringify(map, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  } catch {
+    rmSync(tmp, { force: true });
+    throw new UsageError('cannot write the map file');
+  }
+  // A run paused long enough to lose its lock must not replace a map another run has written since.
+  if (!stillHeld()) {
+    rmSync(tmp, { force: true });
+    throw new UsageError('another scrubline run took over the map while this one was paused; nothing was written');
+  }
+  try {
     renameSync(tmp, target);
   } catch {
     rmSync(tmp, { force: true });
