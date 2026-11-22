@@ -1,25 +1,49 @@
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FAKE, j } from './fixtures.js';
 
 // End to end: the built command, run as a child process with real stdin, stdout, stderr and exit codes.
-const CLI = join(import.meta.dirname, '..', 'dist', 'cli.js');
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const CLI = join(ROOT, 'dist', 'cli.js');
 
 beforeAll(() => {
-  execFileSync(process.execPath, [join(import.meta.dirname, '..', 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.build.json'], {
-    cwd: join(import.meta.dirname, '..'),
-  });
+  execFileSync(process.execPath, [join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.build.json'], { cwd: ROOT });
 }, 60_000);
+
+// Every folder a test made, removed afterwards (the maps in them hold fake secrets; some are made read-only).
+const made: string[] = [];
+afterAll(() => {
+  for (const d of made) {
+    for (const f of readdirSync(d, { recursive: true }) as string[]) chmodSync(join(d, f), 0o700);
+    rmSync(d, { recursive: true, force: true });
+  }
+});
 
 function cli(args: string[], input: string | Buffer = '') {
   const r = spawnSync(process.execPath, [CLI, ...args], { input });
   return { code: r.status, stdout: r.stdout.toString('utf8'), stderr: r.stderr.toString('utf8'), raw: r.stdout };
 }
 
-const tmp = () => mkdtempSync(join(tmpdir(), 'scrubline-cli-'));
+const tmp = () => {
+  const d = mkdtempSync(join(tmpdir(), 'scrubline-cli-'));
+  made.push(d);
+  return d;
+};
+
+/** Runs the command without waiting, so several can overlap. */
+function cliAsync(args: string[], input: string): Promise<{ code: number | null; stdout: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI, ...args]);
+    let stdout = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.on('close', (code) => resolve({ code, stdout }));
+    child.stdin.end(input);
+  });
+}
 const other = j('ops', '@', 'example.org');
 
 describe('scrubline (issue #4)', () => {
@@ -64,6 +88,65 @@ describe('scrubline (issue #4)', () => {
     expect(cli(['restore', '--map', map], 'Write to [EMAIL_1] and [EMAIL_2].').stdout).toBe(`Write to ${FAKE.EMAIL} and ${other}.`);
   });
 
+  it('runs that share a map at the same time never give two values one placeholder (found by the verifier)', async () => {
+    const map = join(tmp(), 'map.json');
+    const inputs = Array.from({ length: 8 }, (_, i) => j(`user${i}`, '@', 'example.com'));
+    const runs = await Promise.all(inputs.map((input) => cliAsync(['--map', map], input)));
+    expect(runs.map((r) => r.code)).toEqual(inputs.map(() => 0));
+    const saved = JSON.parse(readFileSync(map, 'utf8'));
+    expect(Object.keys(saved)).toHaveLength(8);
+    runs.forEach((r, i) => expect(cli(['restore', '--map', map], r.stdout).stdout).toBe(inputs[i]));
+  });
+
+  it('writes through a symlinked map to its target (found by the verifier)', () => {
+    const dir = tmp();
+    mkdirSync(join(dir, 'private'));
+    symlinkSync(join(dir, 'private', 'map.json'), join(dir, 'link.json'));
+    cli(['--map', join(dir, 'link.json')], FAKE.EMAIL);
+    expect(statSync(join(dir, 'link.json'), { throwIfNoEntry: false })).toBeDefined();
+    expect(readdirSync(dir).sort()).toEqual(['link.json', 'private']);
+    expect(JSON.parse(readFileSync(join(dir, 'private', 'map.json'), 'utf8'))).toEqual({ '[EMAIL_1]': FAKE.EMAIL });
+  });
+
+  it('rewrites an existing map with mode 0600, and removes temporary files a crashed run left', () => {
+    const dir = tmp();
+    const map = join(dir, 'map.json');
+    writeFileSync(map, '{}', { mode: 0o644 });
+    writeFileSync(join(dir, 'map.json.12345.tmp'), '{"[EMAIL_1]": "left over"}');
+    cli(['--map', map], FAKE.EMAIL);
+    expect(statSync(map).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual(['map.json']);
+  });
+
+  it('placeholder text typed in the input keeps its meaning in later runs (found by the verifier)', () => {
+    const map = join(tmp(), 'map.json');
+    const first = cli(['--map', map], `use [EMAIL_2] as a template; mine is ${FAKE.EMAIL}`);
+    cli(['--map', map], other);
+    expect(cli(['restore', '--map', map], first.stdout).stdout).toBe(`use [EMAIL_2] as a template; mine is ${FAKE.EMAIL}`);
+  });
+
+  it('a placeholder from an earlier run in a later paste restores to its value', () => {
+    const map = join(tmp(), 'map.json');
+    cli(['--map', map], FAKE.EMAIL);
+    const next = cli(['--map', map], `as I said, [EMAIL_1] and ${other}`);
+    expect(next.stdout).toBe('as I said, [EMAIL_1] and [EMAIL_2]');
+    expect(cli(['restore', '--map', map], next.stdout).stdout).toBe(`as I said, ${FAKE.EMAIL} and ${other}`);
+  });
+
+  it('-- ends the options, so a file name may start with -', () => {
+    const dir = tmp();
+    writeFileSync(join(dir, '-notes.txt'), FAKE.EMAIL);
+    const r = spawnSync(process.execPath, [CLI, '--', '-notes.txt'], { cwd: dir });
+    expect(r.stdout.toString()).toBe('[EMAIL_1]');
+  });
+
+  it('a reader that closes early is not an error (found by the verifier)', () => {
+    const big = `${FAKE.EMAIL}\n`.repeat(200_000);
+    const r = spawnSync('/bin/sh', ['-c', `"${process.execPath}" "${CLI}" | head -c 20`], { input: big });
+    expect(r.stdout.toString()).toBe('[EMAIL_1]\n[EMAIL_1]\n');
+    expect(r.stderr.toString()).toBe('');
+  });
+
   it('restore leaves placeholders it does not know', () => {
     const map = join(tmp(), 'map.json');
     cli(['--map', map], FAKE.EMAIL);
@@ -99,6 +182,14 @@ describe('scrubline (issue #4)', () => {
       expectError(cli(['--nope'], secret), 'unknown option --nope');
       expectError(cli(['a', 'b'], secret), 'give at most one input file');
       expectError(cli(['--map'], secret), '--map needs a file name');
+      // The next option is not a file name: it once received every secret, in a file named `--summary`.
+      expectError(cli(['--map', '--summary'], secret), '--map needs a file name');
+    });
+
+    it('an argument is never echoed: it may be text pasted in place of a file name (found by the verifier)', () => {
+      expectError(cli([`deploy with ${secret}`]), 'cannot read the input file');
+      expectError(cli([`-${secret}`]), 'unknown option');
+      expectError(cli(['--map', join(tmp(), `${secret}.json`), 'restore']), 'the map file does not exist');
     });
 
     it('restore without a map, with a missing one, or with --summary', () => {
@@ -125,7 +216,7 @@ describe('scrubline (issue #4)', () => {
       expectError(cli([join(dir, 'missing.txt')]), 'cannot read');
       // A read-only folder: the map cannot be written, and the masked text is not printed without its map.
       mkdirSync(join(dir, 'locked'), { mode: 0o500 });
-      expectError(cli(['--map', join(dir, 'locked', 'map.json')], secret), 'cannot write map file');
+      expectError(cli(['--map', join(dir, 'locked', 'map.json')], secret), 'cannot write the map file');
     });
   });
 });

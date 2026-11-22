@@ -27,7 +27,7 @@ untrusted. A missed secret is a leak that cannot be taken back.
 Node.js 20 or later.
 
 ```sh
-npm ci            # install exact pinned dev dependencies (TypeScript, Vitest, fast-check)
+npm ci            # install exact pinned dev dependencies (TypeScript, Vitest, fast-check, @types/node)
 npm run check     # typecheck + all tests; must pass before a PR
 npm run build     # emit dist/ (only needed to try the package by hand)
 ```
