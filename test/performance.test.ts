@@ -35,6 +35,13 @@ const adversarial: [string, string][] = [
   ['one URL read past its path through a long run with no @', 'a://u:x/' + 'b/'.repeat(N / 2)],
   ['an authority of placeholders, scanned past', 'a://' + '[A_1]'.repeat(N / 5) + ':p@h'],
   ['keys and colons in one authority', j(FAKE.AWS_KEY, ':').repeat(N / 21) + '@h'],
+  // Home paths: the user name is an unbounded run, and a Windows separator is a run of backslashes.
+  ['home roots back to back, each with no name', '/home/'.repeat(N / 6)],
+  ['one home path with a very long name', '/Users/' + 'a'.repeat(N)],
+  ['one long name of \\u escapes', '/home/' + '\\u00e9'.repeat(N / 6)],
+  ['a drive letter followed by a long run of backslashes', 'C:' + '\\'.repeat(N)],
+  ['drive prefixes back to back with no Users', 'C:\\\\'.repeat(N / 4)],
+  ['home roots inside other paths', 'x/home/'.repeat(N / 7)],
 ];
 
 describe('scan time stays linear on crafted input', () => {

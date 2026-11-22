@@ -72,7 +72,8 @@ function collect(input: string, detectors: readonly Detector[]): Span[] {
     while (i < taken.length) merged.push(taken[i++]!);
     taken = merged;
   }
-  return taken.map((s, k) => absorbEscape(input, s, k > 0 ? taken[k - 1]!.end : 0));
+  const keepsBackslash = new Set(detectors.filter((d) => d.keepsBackslashBefore).map((d) => d.kind));
+  return taken.map((s, k) => (keepsBackslash.has(s.kind) ? s : absorbEscape(input, s, k > 0 ? taken[k - 1]!.end : 0)));
 }
 
 /**

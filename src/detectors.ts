@@ -14,6 +14,11 @@ export interface Detector {
    * higher-priority detector already claimed arrives as `\0` characters, which no detector may match.
    */
   readonly find: (input: string) => Iterable<readonly [number, number]>;
+  /**
+   * A backslash right before a span is a path separator, not an escape, so the span does not take it (see `scrub`'s
+   * `absorbEscape`). Only for formats where that backslash can never start a valid JSON escape.
+   */
+  readonly keepsBackslashBefore?: boolean;
 }
 
 /** A detector from a global regex, with an optional second look at each match. */
@@ -354,6 +359,93 @@ function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
   }
 }
 
+/**
+ * The start of a home folder, up to the separator before the user name: `/Users/`, `/home/`, and a Windows drive's
+ * `X:\Users\` (also written `X:\\Users\\` in JSON, `X:\\\\Users\\\\` in JSON inside JSON, or `X:/Users/`). A Windows
+ * path uses one separator throughout; trade-off: a mixed one (`C:/Users\jane`) is not a home path, nor is `/users/…`
+ * in lower case (only Windows paths are matched in any case). The one-separator rule also
+ * means an odd run of `\` before the name never appears in valid JSON (`\U` and `\u` + `sers` are not escapes), so
+ * its last `\` is a separator, not an escape. The drive letter may be `\0`: a key glued on by `-` or `_`
+ * (`<jwt>-C:\Users\…`) runs on through it, and the name after it must still be masked (found by the test generator).
+ * `\\+` backtracks only over its own run, which follows one drive letter: linear.
+ */
+const HOME_PREFIX = /\/(?:Users|home)\/|[A-Za-z\0]:(\\+|\/)(?:[Uu]sers|USERS)\1/g;
+/**
+ * Before `/Users` or `/home`: not inside a path or a word (`foo/Users/x`, `/opt/home/x`, `./home/x`), except after an
+ * escape (`\n/home/jane` in JSON) or `file://`. Trade-off: a relative path such as `../home/jane` or `x//home/jane`
+ * is not masked.
+ */
+const POSIX_HOME_START = new RegExp(start('A-Za-z0-9./'), 'y');
+/**
+ * Right after `file://`, or after `://` whose scheme is claimed text: a key glued on by `_` or `-` runs on into `file`
+ * (`sk-proj-…_file:///Users/…`), and the name after it must still be masked (found by the test generator).
+ */
+const AFTER_FILE_URL = /(?<=(?:file|\0):\/\/)/y;
+/** Before a drive letter: not glued to a letter or digit (`xC:\Users\…`), except after an escape. */
+const DRIVE_START = new RegExp(start(ALNUM), 'y');
+/** A Windows home prefix (as in `HOME_PREFIX`) starting at `lastIndex`, its drive letter at a boundary. */
+const WINDOWS_PREFIX_AT = new RegExp(`${start(ALNUM)}[A-Za-z]:(\\\\+|/)(?:[Uu]sers|USERS)\\1`, 'y');
+/**
+ * Characters that end a user name: whitespace and control characters (`\0`, claimed text, too), quotes, path
+ * separators and punctuation that cannot be in a Windows user name, and `(` `)` `` ` `` `{` `}`, which put a path in
+ * running text. Trade-off: a Windows name holding a space, `'`, `(` or `)` (`C:\Users\Jane Doe`, `O'Brien`) is masked
+ * only up to that character, and the rest stays visible.
+ */
+const NAME_END = new Uint8Array(128);
+for (let c = 0; c <= 32; c++) NAME_END[c] = 1;
+for (const c of '/\\"\'`:;,<>|?*[]=(){}\x7f') NAME_END[c.charCodeAt(0)] = 1;
+/**
+ * Folders under the home root that belong to no one, with `All Users` (it holds a space) checked in the scan. Compared
+ * without case (`C:\Users\public`). Trade-off: a person whose user name is one of these is not masked.
+ */
+const SHARED_HOME = new Set(['shared', 'public', 'default']);
+/** Whether `input[i]` can be part of a user name; false past the end. */
+function isNameChar(input: string, i: number): boolean {
+  if (i >= input.length) return false;
+  const c = input.charCodeAt(i);
+  return c >= 128 || !NAME_END[c];
+}
+/** Whether four characters are the hex of a `\uXXXX` escape for a non-ASCII character. */
+const isNonAsciiEscape = (hex: string): boolean => /^[0-9A-Fa-f]{4}$/.test(hex) && parseInt(hex, 16) >= 0x80;
+
+/**
+ * The user name in a home-directory path: `/Users/[HOME_USER_1]/projects`, the rest of the path kept. The name runs to
+ * the first character of `NAME_END` or the end of the text; in a POSIX or `\\` (JSON) path, a `\uXXXX` escape for a
+ * non-ASCII letter (`jos\u00e9`) is part of it. Trailing dots are left out (`see /home/jane.` ends a sentence);
+ * trade-off: a name that really ends in `.` keeps that dot visible.
+ */
+function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
+  HOME_PREFIX.lastIndex = 0;
+  for (let m = HOME_PREFIX.exec(input); m; m = HOME_PREFIX.exec(input)) {
+    const prefixEnd = HOME_PREFIX.lastIndex;
+    const guard = input[m.index] === '/' ? POSIX_HOME_START : DRIVE_START;
+    guard.lastIndex = m.index;
+    AFTER_FILE_URL.lastIndex = m.index;
+    const atBoundary = guard.test(input) || (guard === POSIX_HOME_START && AFTER_FILE_URL.test(input));
+    // Each try starts one character further on, and the name scan below moves past what it reads: linear.
+    HOME_PREFIX.lastIndex = m.index + 1;
+    if (!atBoundary) continue;
+    // Escapes are read in a POSIX path, or after an even run of backslashes (the path is JSON-encoded).
+    const escapes = m[1] === undefined || m[1] === '/' || m[1].length % 2 === 0;
+    let e = prefixEnd;
+    for (;;) {
+      if (isNameChar(input, e)) e++;
+      else if (escapes && input.startsWith('\\u', e) && isNonAsciiEscape(input.slice(e + 2, e + 6))) e += 6;
+      else break;
+    }
+    // A name run on into the drive letter of a Windows home path (`/Users/jane%20d:\users\bob`) ends before it, so that
+    // path's name is masked too (found by the test generator).
+    WINDOWS_PREFIX_AT.lastIndex = e - 1;
+    if (e > prefixEnd && input[e] === ':' && WINDOWS_PREFIX_AT.test(input)) e--;
+    while (e > prefixEnd && input[e - 1] === '.') e--;
+    if (e === prefixEnd) continue;
+    HOME_PREFIX.lastIndex = e;
+    const name = input.slice(prefixEnd, e).toLowerCase();
+    const allUsers = name === 'all' && input.slice(e, e + 6).toLowerCase() === ' users' && !isNameChar(input, e + 6);
+    if (!SHARED_HOME.has(name) && !allUsers) yield [prefixEnd, e];
+  }
+}
+
 export const DETECTORS: readonly Detector[] = [
   { kind: 'PRIVATE_KEY', find: findKeyBlocks },
   // Before JWT and the `sk-` formats: a Telegram token's random half can hold `-sk-…`, which an OpenAI-style match
@@ -383,5 +475,8 @@ export const DETECTORS: readonly Detector[] = [
   // After the key formats, so a key used as a URL password keeps its own type; before EMAIL, so `user:pw@host.com`
   // is not read as the address `pw@host.com`.
   { kind: 'URL_PASSWORD', find: findUrlPasswords },
+  // After URL_PASSWORD, so a password holding `/home/…` stays one mask; before EMAIL, so `/home/jane@corp.com` is
+  // masked as the user name.
+  { kind: 'HOME_USER', find: findHomeUsers, keepsBackslashBefore: true },
   { kind: 'EMAIL', find: findEmails },
 ];
