@@ -11,6 +11,7 @@
 #      (factory/prompts/fix-review.md), checks again and pushes, up to MAX_REVIEW_ROUNDS times;
 #   6. stops with label `agent-needs-help` and a comment on the issue whenever a limit is hit or something fails.
 # It never merges: the human does. Text the agent wrote is scrubbed with Scrubline before it is posted.
+# One installation per repository: the lock is local, so two machines running this could claim the same ticket.
 set -uo pipefail
 
 REPO=${SCRUBLINE_REPO:-Abdul-Jimoh/scrubline}
@@ -43,7 +44,7 @@ trap 'rm -rf "$LOCK"' EXIT
 # A ticket already claimed (working, or stopped for help) blocks the queue until a human clears it.
 claimed=$(gh issue list -R "$REPO" --state open --label agent-working --json number --jq 'length') || exit 0
 [ "$claimed" = 0 ] || exit 0
-ISSUE=$(gh issue list -R "$REPO" --state open --label ready-for-agent --author "$OWNER" --json number,createdAt \
+ISSUE=$(gh issue list -R "$REPO" --state open --label ready-for-agent --author "$OWNER" --limit 1000 --json number,createdAt \
   --jq 'sort_by(.createdAt) | .[0].number // empty') || exit 0
 [ -n "$ISSUE" ] || exit 0
 
@@ -130,6 +131,8 @@ agent() {
   [ -s "$out" ] && summary=$(jq -r '"\(.num_turns) turns, \((.duration_ms // 0) / 1000 | floor) s"' "$out" 2>/dev/null)
   # 142 is SIGALRM: the session ran past AGENT_TIMEOUT.
   log "agent exit $rc (${summary:-no result}$([ "$rc" = 142 ] && echo ", timed out after $AGENT_TIMEOUT s"))"
+  # A session that timed out or failed may have left half-done work that still passes the checks: stop instead.
+  [ "$rc" = 0 ] || needs_help "the agent session ended with exit $rc$([ "$rc" = 142 ] && echo " (timed out)")"
 }
 
 # True when `npm run check` passes and the branch has committed work and a clean tree.
@@ -145,7 +148,7 @@ checks_pass() {
 wait_for_review() {
   local sha="$1" waited=0 nudged=0 out
   while [ "$waited" -lt "$REVIEW_TIMEOUT" ]; do
-    out=$(qodo read pr-review-session findings --pr-url "$PR_URL" --extended 2>/dev/null) || out=""
+    out=$(qodo read pr-review-session findings --pr-url "$PR_URL" --extended --json 2>/dev/null) || out=""
     if [ -n "$out" ] && printf '%s' "$out" | jq -e --arg sha "$sha" \
       '.review_session.commit_sha == $sha and .review_session.status == "completed" and (.qar_operation_result_truncated != true)' >/dev/null 2>&1; then
       printf '%s' "$out"
@@ -179,7 +182,9 @@ git -C "$SRC" fetch -q origin main || needs_help "git fetch failed"
 git -C "$SRC" worktree remove --force "$WT" 2>/dev/null
 git -C "$SRC" worktree add -q -B "$BRANCH" "$WT" origin/main || needs_help "could not create the worktree"
 (cd "$WT" && npm ci --silent && npm run build --silent) >"$RUN_DIR/npm-ci.log" 2>&1 || needs_help "npm ci or the build failed"
-mkdir -p "$SCRUBBER" && cp -R "$WT/dist/." "$SCRUBBER/" || needs_help "could not copy the scrubber"
+# With a package.json saying "type": "module", so Node 20 (no module detection) loads the copy as ES modules.
+mkdir -p "$SCRUBBER" && cp -R "$WT/dist/." "$SCRUBBER/" && printf '{ "type": "module" }\n' >"$SCRUBBER/package.json" ||
+  needs_help "could not copy the scrubber"
 
 # --- Implement, with a retry limit ------------------------------------------------------------------------------
 ATTEMPT=1
@@ -208,7 +213,7 @@ push || needs_help "git push failed"
 } >"$RUN_DIR/pr-body.md"
 PR_URL=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
 if [ -n "$PR_URL" ]; then
-  gh pr edit "$PR_URL" --body-file "$RUN_DIR/pr-body.md" >/dev/null || log "could not update $PR_URL"
+  gh pr edit "$PR_URL" --body-file "$RUN_DIR/pr-body.md" >/dev/null || needs_help "could not update the PR description"
 else
   PR_URL=$(gh pr create -R "$REPO" --base main --head "$BRANCH" --title "$TITLE (#$ISSUE)" --body-file "$RUN_DIR/pr-body.md") ||
     needs_help "gh pr create failed"
@@ -222,7 +227,8 @@ while :; do
   SHA=$(git -C "$WT" rev-parse HEAD)
   review=$(wait_for_review "$SHA") || needs_help "no completed Qodo review of ${SHA:0:7} after $((REVIEW_TIMEOUT / 60)) minutes"
   printf '%s' "$review" >"$RUN_DIR/review-$ROUND.json"
-  open=$(jq -e '[(.findings // [])[] | select(.attribution_status | IN("pending","partial_implementation","not_implemented","focus_areas_edited"))]' \
+  # Open unless its status is one Qodo documents as closed, so a new or renamed status is never read as clean.
+  open=$(jq -e '[(.findings // [])[] | select(.attribution_status | IN("full_implementation","dismissed","detected_after_merge","outdated") | not)]' \
     "$RUN_DIR/review-$ROUND.json") || needs_help "could not read Qodo's review of ${SHA:0:7}"
   count=$(printf '%s' "$open" | jq length)
   log "Qodo review of ${SHA:0:7}: $count open finding(s)"
@@ -238,6 +244,8 @@ done
 
 # --- Hand over -------------------------------------------------------------------------------------------------
 trap - INT TERM
-gh issue edit "$ISSUE" -R "$REPO" --remove-label agent-working >/dev/null || log "could not unlabel #$ISSUE"
+# If the label stayed, every later run would see a claimed ticket and wait: say so instead of finishing quietly.
+gh issue edit "$ISSUE" -R "$REPO" --remove-label agent-working >/dev/null ||
+  needs_help "$PR_URL is ready, but the agent-working label could not be removed"
 comment "The scheduled agent finished: $PR_URL is ready for a human. \`npm run check\` passes, and Qodo's review of \`${SHA:0:7}\` has no open findings ($ROUND fix round(s)). Run \`$RUN_ID\`."
 log "done: $PR_URL"
