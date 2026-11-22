@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -162,6 +162,21 @@ describe('scrubline (issue #4)', () => {
     expect(r).toMatchObject({ code: 0, stdout: '[EMAIL_1]', stderr: '' });
     expect(Date.now() - t).toBeLessThan(5000);
     expect(readdirSync(dirname(map))).toEqual(['map.json']);
+  });
+
+  it('a lock no live run can own is taken over: empty and old, garbage and old, or another user\'s process (found by the verifier)', () => {
+    const dir = tmp();
+    const old = new Date(Date.now() - 60_000);
+    const locks: [string, string][] = [['empty', ''], ['garbage', 'garbage'], ['pid1', '1\n']]; // pid 1 is launchd/init, not ours
+    for (const [name, content] of locks) {
+      const map = join(dir, `${name}.json`);
+      writeFileSync(`${map}.lock`, content);
+      if (name !== 'pid1') utimesSync(`${map}.lock`, old, old);
+      const t = Date.now();
+      expect(cli(['--map', map], FAKE.EMAIL)).toMatchObject({ code: 0, stdout: '[EMAIL_1]' });
+      expect(Date.now() - t).toBeLessThan(5000);
+    }
+    expect(readdirSync(dir).filter((f) => f.includes('.lock'))).toEqual([]);
   });
 
   it('a lock held by a live run is waited for, not taken over', async () => {

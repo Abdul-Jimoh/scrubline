@@ -6,7 +6,7 @@
  * quotes the text it failed on, and `scrubline "$(pbpaste)"` passes the clipboard as a file name, so errors say what
  * failed, never with what.
  */
-import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { restore, scrub, type ScrubMap } from './scrub.js';
 
@@ -133,28 +133,58 @@ function mapTarget(file: string): string {
 
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/** Whether the run that wrote `lock` is still running. An unreadable or half-written lock counts as live. */
-function holderAlive(lock: string): boolean {
-  let pid: number;
+/** How old a lock may be before it counts as stale whatever it holds: no run holds the map this long. */
+const LOCK_MAX_AGE_MS = 10 * 60_000;
+/** How long an empty or unreadable lock is given to get its process id (a run writes it right after creating it). */
+const LOCK_WRITE_GRACE_MS = 5_000;
+
+/**
+ * Whether `lock` (as stat'ed in `info`) may still belong to a live run. It does not when its process is gone (Ctrl-C,
+ * `kill -9`), belongs to another user (EPERM: a reused id, such as after a reboot), when it holds no process id after
+ * the grace period (a run stopped between creating and writing it), or when it is older than any run takes.
+ */
+function holderAlive(lock: string, info: { mtimeMs: number }): boolean {
+  const age = Date.now() - info.mtimeMs;
+  if (age > LOCK_MAX_AGE_MS) return false;
+  let pid = Number.NaN;
   try {
-    pid = Number.parseInt(readFileSync(lock, 'utf8'), 10);
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== 'ENOENT';
+    pid = Number(readFileSync(lock, 'utf8').trim());
+  } catch {
+    // Gone or unreadable: decided by age below.
   }
-  if (!Number.isInteger(pid) || pid <= 0) return true;
+  if (!Number.isInteger(pid) || pid <= 0) return age < LOCK_WRITE_GRACE_MS;
   try {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== 'ESRCH';
+    return (e as NodeJS.ErrnoException).code !== 'ESRCH' && (e as NodeJS.ErrnoException).code !== 'EPERM';
   }
+}
+
+/**
+ * Removes a stale lock, but only the one that was judged stale (`ino`): another waiter may have taken it over in
+ * between and made a new one, which is put back. A rename is atomic, so only one waiter gets each file.
+ */
+function takeOver(lock: string, ino: number): void {
+  const claimed = `${lock}.${process.pid}.stale`;
+  try {
+    renameSync(lock, claimed);
+  } catch {
+    return; // another waiter took it first
+  }
+  try {
+    if (lstatSync(claimed).ino !== ino) linkSync(claimed, lock); // a live run's new lock: put it back
+  } catch {
+    // A third run made a lock meanwhile; theirs stands.
+  }
+  rmSync(claimed, { force: true });
 }
 
 /**
  * Runs `fn` holding `<map>.lock`, so two runs sharing a map cannot both number from the same old map and then
  * overwrite each other's entries (a placeholder would restore to another run's value). The lock holds the run's
  * process id, so a lock left by a run that was stopped (Ctrl-C, `kill -9`) is taken over by the next run. A run waits
- * while the holder is alive, up to five minutes.
+ * while the holder is alive, up to five minutes, and removes the lock only while it still holds its own id.
  */
 function withLock<T>(target: string, fn: () => T): T {
   const lock = `${target}.lock`;
@@ -163,21 +193,21 @@ function withLock<T>(target: string, fn: () => T): T {
   } catch {
     throw new UsageError('cannot write the map file');
   }
+  const mine = `${process.pid}\n`;
   for (const start = Date.now(); ; sleep(25)) {
     try {
-      writeFileSync(lock, `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+      writeFileSync(lock, mine, { flag: 'wx', mode: 0o600 });
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw new UsageError('cannot write the map file');
-      if (!holderAlive(lock)) {
-        // Only one waiter wins the rename, so two waiters cannot both remove a fresh lock.
-        const claimed = `${lock}.${process.pid}.stale`;
-        try {
-          renameSync(lock, claimed);
-          rmSync(claimed, { force: true });
-        } catch {
-          // Another waiter took it over first.
-        }
+      let info;
+      try {
+        info = lstatSync(lock);
+      } catch {
+        continue; // released meanwhile
+      }
+      if (!holderAlive(lock, info)) {
+        takeOver(lock, info.ino);
         continue;
       }
       if (Date.now() - start > LOCK_WAIT_MS) throw new UsageError('the map file is still in use by another scrubline run');
@@ -186,7 +216,11 @@ function withLock<T>(target: string, fn: () => T): T {
   try {
     return fn();
   } finally {
-    rmSync(lock, { force: true });
+    try {
+      if (readFileSync(lock, 'utf8') === mine) rmSync(lock, { force: true });
+    } catch {
+      // Already gone.
+    }
   }
 }
 
