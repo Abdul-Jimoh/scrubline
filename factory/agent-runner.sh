@@ -140,14 +140,16 @@ agent() {
 
 # Commits what the agent staged, and only that, through the repository's commit hooks, with the agent's
 # commit-msg.txt (or a default naming the ticket). A file the agent left unstaged is not swept in: it fails the
-# clean-tree check below.
+# clean-tree check below. Sets COMMITTED=yes when it made a commit.
+COMMITTED=no
 commit_staged() {
+  COMMITTED=no
   git -C "$WT" diff --cached --quiet && return 0
   local msg="$RUN_DIR/commit-msg.txt"
   [ -s "$msg" ] || printf '%s (#%s)\n\nCommitted by the scheduled agent runner.\n' "$TITLE" "$ISSUE" >"$msg"
   # Git's own output (a commit hook's reason for refusing, say) goes to the check log the agent reads on a retry.
   if git -C "$WT" commit -q -F "$msg" >"$1" 2>&1; then
-    rm -f "$msg"
+    COMMITTED=yes
     log "committed the agent's staged work"
   else
     log "the runner could not commit the staged work"
@@ -155,14 +157,19 @@ commit_staged() {
   fi
 }
 
+# Undoes the runner's own commit when the checks then fail, keeping the work staged for the next attempt, so only
+# commits that passed the checks ever reach the pull request.
+uncommit() { [ "$COMMITTED" = yes ] && git -C "$WT" reset -q --soft HEAD~1 && COMMITTED=no; return 0; }
+
 # True when the staged work is committed, `npm run check` passes on that commit, the tree is clean, and the branch has
 # committed work. The check runs after the commit, so a commit hook that changes content cannot slip past it.
 checks_pass() {
   local logf="$RUN_DIR/check-$1.log"
   commit_staged "$logf" || { echo "The runner could not commit the staged work; git's output is above." >>"$logf"; return 1; }
-  (cd "$WT" && npm run check) >"$logf" 2>&1 || { log "check $1: npm run check failed"; tail -60 "$logf" >"$logf.tail"; mv "$logf.tail" "$logf"; return 1; }
-  [ -z "$(git -C "$WT" status --porcelain)" ] || { log "check $1: changes left unstaged or uncommitted"; echo "Changes not in the commit. Stage the ones that belong to the change with git add; scratch files belong in the run folder, not the worktree:" >>"$logf"; git -C "$WT" status --short >>"$logf"; return 1; }
+  (cd "$WT" && npm run check) >"$logf" 2>&1 || { log "check $1: npm run check failed"; tail -60 "$logf" >"$logf.tail"; mv "$logf.tail" "$logf"; uncommit; return 1; }
+  [ -z "$(git -C "$WT" status --porcelain)" ] || { log "check $1: changes left unstaged or uncommitted"; echo "Changes not in the commit. Stage the ones that belong to the change with git add; scratch files belong in the run folder, not the worktree:" >>"$logf"; git -C "$WT" status --short >>"$logf"; uncommit; return 1; }
   [ -n "$(git -C "$WT" log --oneline origin/main..HEAD)" ] || { log "check $1: nothing committed"; echo "no commits on the branch" >>"$logf"; return 1; }
+  rm -f "$RUN_DIR/commit-msg.txt"
   log "check $1: pass"
 }
 
