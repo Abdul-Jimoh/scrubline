@@ -6,7 +6,7 @@
  * quotes the text it failed on, and `scrubline "$(pbpaste)"` passes the clipboard as a file name, so errors say what
  * failed, never with what.
  */
-import { linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { restore, scrub, type ScrubMap } from './scrub.js';
 
@@ -133,7 +133,10 @@ function mapTarget(file: string): string {
 
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/** How old a lock may be before it counts as stale whatever it holds: no run holds the map this long. */
+/**
+ * How old a lock may be before it counts as stale whatever it holds. No run holds the map this long: Node strings stop
+ * near 512 MB, which scrubs in under a minute.
+ */
 const LOCK_MAX_AGE_MS = 10 * 60_000;
 /** How long an empty or unreadable lock is given to get its process id (a run writes it right after creating it). */
 const LOCK_WRITE_GRACE_MS = 5_000;
@@ -161,23 +164,35 @@ function holderAlive(lock: string, info: { mtimeMs: number }): boolean {
   }
 }
 
+/** A takeover guard older than this was left by a run stopped inside its few-microsecond takeover. */
+const GUARD_MAX_AGE_MS = 10_000;
+
 /**
- * Removes a stale lock, but only the one that was judged stale (`ino`): another waiter may have taken it over in
- * between and made a new one, which is put back. A rename is atomic, so only one waiter gets each file.
+ * Removes `lock` if it is still stale, holding `<lock>.takeover` while it checks and removes. Without the guard, a
+ * waiter could judge the old lock stale, pause, and then remove the fresh lock another waiter had made meanwhile;
+ * with it, the check and the removal happen with no other takeover in between, and removing is the only way the lock
+ * path is freed, so a live run's lock is never removed. Trade-off: a guard left by a run stopped inside it blocks
+ * takeovers for ten seconds, and two runs could then both remove it at that moment.
  */
-function takeOver(lock: string, ino: number): void {
-  const claimed = `${lock}.${process.pid}.stale`;
+function takeOver(lock: string): void {
+  const guard = `${lock}.takeover`;
   try {
-    renameSync(lock, claimed);
+    writeFileSync(guard, `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
   } catch {
-    return; // another waiter took it first
+    try {
+      if (Date.now() - lstatSync(guard).mtimeMs > GUARD_MAX_AGE_MS) rmSync(guard, { force: true });
+    } catch {
+      // Released meanwhile.
+    }
+    return;
   }
   try {
-    if (lstatSync(claimed).ino !== ino) linkSync(claimed, lock); // a live run's new lock: put it back
+    if (!holderAlive(lock, lstatSync(lock))) rmSync(lock, { force: true });
   } catch {
-    // A third run made a lock meanwhile; theirs stands.
+    // Released meanwhile.
+  } finally {
+    rmSync(guard, { force: true });
   }
-  rmSync(claimed, { force: true });
 }
 
 /**
@@ -207,7 +222,7 @@ function withLock<T>(target: string, fn: () => T): T {
         continue; // released meanwhile
       }
       if (!holderAlive(lock, info)) {
-        takeOver(lock, info.ino);
+        takeOver(lock);
         continue;
       }
       if (Date.now() - start > LOCK_WAIT_MS) throw new UsageError('the map file is still in use by another scrubline run');
