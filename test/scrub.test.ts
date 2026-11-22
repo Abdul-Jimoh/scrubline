@@ -345,6 +345,13 @@ describe('known limit: keys joined by a character of their own alphabet', () => 
     expect(scrub(`${FAKE.JWT}-${telegram}`).text).toBe('[JWT_1][TELEGRAM_BOT_TOKEN_1]');
   });
 
+  it('a key whose body holds another prefix after - is split; a short start stays visible (found by the test generator)', () => {
+    expect(scrub(j('xox', 'b-s', 'k-', 'A'.repeat(20))).text).toBe(j('xox', 'b-[OPENAI_KEY_1]'));
+    expect(scrub(j('xox', 'b-1234-s', 'k-', 'A'.repeat(20))).text).toBe(j('xox', 'b-1234-[OPENAI_KEY_1]'));
+    // Long enough for its own format, the start is masked too.
+    expect(scrub(j('xox', 'b-123456789-s', 'k-', 'A'.repeat(20))).text).toBe('[SLACK_TOKEN_1][OPENAI_KEY_1]');
+  });
+
   it('a JWT runs on the same way into a SendGrid key', () => {
     expect(scrub(`${FAKE.JWT}_${FAKE.SENDGRID_KEY}`).text).toBe(`[JWT_1]${FAKE.SENDGRID_KEY.slice(2)}`);
   });
@@ -365,6 +372,38 @@ describe('numbering', () => {
     const { text, map } = scrub(input);
     expect(text).toBe('literal [EMAIL_1] and [EMAIL_2], then [EMAIL_3]');
     expect(restore(text, map)).toBe(input);
+  });
+});
+
+describe('continuing from an earlier map (issue #4)', () => {
+  const other = j('ops', '@', 'example.org');
+
+  it('keeps earlier placeholders and numbers new values after them', () => {
+    const first = scrub(`mail ${FAKE.EMAIL}`);
+    const { text, map } = scrub(`${other} and ${FAKE.EMAIL}`, { map: first.map });
+    expect(text).toBe('[EMAIL_2] and [EMAIL_1]');
+    expect(map).toEqual({ '[EMAIL_1]': FAKE.EMAIL, '[EMAIL_2]': other });
+  });
+
+  it('never reuses a number from the map, even for a kind not in the input', () => {
+    const { text } = scrub(FAKE.EMAIL, { map: { '[EMAIL_1]': 'x', '[EMAIL_3]': 'y', '[AWS_KEY_1]': 'z' } });
+    expect(text).toBe('[EMAIL_2]');
+  });
+
+  it('a placeholder in the input that is in the map restores to its value', () => {
+    const { map } = scrub(FAKE.EMAIL);
+    const next = scrub('as I said, [EMAIL_1]', { map });
+    expect(restore(next.text, next.map)).toBe(`as I said, ${FAKE.EMAIL}`);
+  });
+
+  it('rejects a map entry that is not a placeholder and a string, without echoing it', () => {
+    const bad = { token: FAKE.GITHUB_TOKEN } as Record<string, string>;
+    expect(() => scrub('x', { map: bad })).toThrow(TypeError);
+    try {
+      scrub('x', { map: bad });
+    } catch (e) {
+      expect(String(e)).not.toContain(FAKE.GITHUB_TOKEN);
+    }
   });
 });
 

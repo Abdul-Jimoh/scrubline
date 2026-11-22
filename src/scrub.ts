@@ -19,6 +19,17 @@ export interface ScrubResult {
 }
 
 const PLACEHOLDER = /\[[A-Z][A-Z0-9_]*_\d+\]/g;
+const PLACEHOLDER_KIND = /^\[([A-Z][A-Z0-9_]*)_\d+\]$/;
+
+export interface ScrubOptions {
+  /**
+   * The map from earlier runs (a chat that goes on over several pastes). A value already in it keeps its
+   * placeholder, and new values are numbered after its placeholders, so none is ever reassigned. The result's map
+   * holds these entries plus the new ones. Placeholder text in the input that is in this map stands for that value,
+   * so `restore` turns it back into the value rather than leaving it as typed.
+   */
+  readonly map?: ScrubMap;
+}
 
 interface Span {
   kind: string;
@@ -80,12 +91,19 @@ function absorbEscape(input: string, s: Span, prevEnd: number): Span {
  * (`[AWS_KEY_1]`); the same value always gets the same placeholder. Numbers skip any placeholder-shaped text
  * already in the input, so `restore(result.text, result.map)` returns the input exactly.
  */
-export function scrub(input: string): ScrubResult {
+export function scrub(input: string, options: ScrubOptions = {}): ScrubResult {
   const spans = collect(input, DETECTORS);
   const taken = new Set(input.match(PLACEHOLDER));
   const placeholderOf = new Map<string, string>();
   const nextNumber = new Map<string, number>();
   const map: ScrubMap = {};
+  for (const [placeholder, value] of Object.entries(options.map ?? {})) {
+    const kind = PLACEHOLDER_KIND.exec(placeholder)?.[1];
+    if (kind === undefined || typeof value !== 'string') throw new TypeError('scrub: options.map holds an entry that is not a placeholder and a string');
+    taken.add(placeholder);
+    placeholderOf.set(`${kind}\u0000${value}`, placeholder);
+    map[placeholder] = value;
+  }
   const findings: Finding[] = [];
   let text = '';
   let last = 0;
