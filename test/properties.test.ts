@@ -81,11 +81,14 @@ const urlWithPassword = fc
     fc.constantFrom('', '.internal', '.example.com'),
     fc.constantFrom('', ':5432', '/db', ':6379/0?ssl=true'),
   )
-  .map(([scheme, user, pw, host, domain, rest]) => [`${scheme}://${user}:${pw}@${host}${domain}${rest}`, pw] as const);
+  .map(([scheme, user, pw, host, domain, rest]) => {
+    const head = `${scheme}://${user}:`;
+    return [`${head}${pw}@${host}${domain}${rest}`, pw, head.length] as const;
+  });
 
-/** `[text, secret]`: what is planted in the document, and the part of it that must not survive. */
+/** `[text, secret, offset]`: what is planted, the part of it that must not survive, and where that part starts. */
 const planted = fc.oneof(
-  { arbitrary: whole.map((s) => [s, s] as const), weight: 17 },
+  { arbitrary: whole.map((s) => [s, s, 0] as const), weight: 17 },
   { arbitrary: urlWithPassword, weight: 2 },
 );
 
@@ -106,13 +109,29 @@ const separator = fc.constantFrom(
   ...['\x01', '\x1f', '\x1b[32m', '\x1b[0m ', '\\u001b[31m', '%3D', '%20', '&token=', '\\u00e9', '\\', '%'],
 );
 
-/** A document of filler with planted secrets; `secrets` lists what was planted. */
-const document = fc
-  .array(fc.tuple(fc.oneof(planted.map((s) => ({ s })), filler.map((f) => ({ f }))), separator), { maxLength: 25 })
-  .map((parts) => ({
-    text: parts.map(([p, sep]) => ('s' in p ? p.s[0] : p.f) + sep).join(''),
-    secrets: parts.flatMap(([p]) => ('s' in p ? [p.s[1]] : [])),
-  }));
+/**
+ * Separators no key or URL can run on through. Joined by `_`, `-`, `:`, `=` or `%`, which a key's or a userinfo's own
+ * characters include, a value can take the start of the next one with it (README "Known limits").
+ */
+const boundary = fc.constantFrom(' ', '\n', ', ', '; ', '\t', ' (', ') ', '\\n', '"', '\r\n', '\x01', '\x1b[0m ', '\\u001b[31m');
+
+/** A document of filler with planted secrets; `secrets` lists what was planted, `at` where each one starts. */
+const documentWith = (sep: fc.Arbitrary<string>) => fc
+  .array(fc.tuple(fc.oneof(planted.map((s) => ({ s })), filler.map((f) => ({ f }))), sep), { maxLength: 25 })
+  .map((parts) => {
+    let text = '';
+    const secrets: string[] = [];
+    const at: number[] = [];
+    for (const [p, sep] of parts) {
+      if ('s' in p) {
+        secrets.push(p.s[1]);
+        at.push(text.length + p.s[2]);
+      }
+      text += ('s' in p ? p.s[0] : p.f) + sep;
+    }
+    return { text, secrets, at };
+  });
+const document = documentWith(separator);
 
 const runs = { numRuns: 500 };
 
@@ -142,6 +161,21 @@ describe('properties', () => {
       fc.property(document, ({ text: x, secrets }) => {
         const { text } = scrub(x);
         for (const s of secrets) expect(text).not.toContain(s);
+      }),
+      runs,
+    );
+  });
+
+  it('every character of every planted secret is inside a mask, when secrets are separated by a boundary', () => {
+    // Stricter than the test above: a secret split into a visible part and a masked part passes that one.
+    fc.assert(
+      fc.property(documentWith(boundary), ({ text: x, secrets, at }) => {
+        const { findings } = scrub(x);
+        const masked = new Uint8Array(x.length);
+        for (const f of findings) masked.fill(1, f.start, f.end);
+        secrets.forEach((s, i) => {
+          for (let k = at[i]!; k < at[i]! + s.length; k++) expect(masked[k], `${JSON.stringify(s)} at ${k - at[i]!}`).toBe(1);
+        });
       }),
       runs,
     );

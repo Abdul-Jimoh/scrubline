@@ -221,6 +221,18 @@ describe('passwords in URLs (issue #3)', () => {
     expect(scrub('redis://:Pa#ss@cache:6379').text).toBe('redis://:[URL_PASSWORD_1]@cache:6379');
   });
 
+  it('a bracketed or placeholder user name, or a password starting with #, / or ?, still masks it (found by the verifier)', () => {
+    expect(scrub('postgres://[USER_1]:ab/cd@host/x').text).toBe('postgres://[USER_1]:[URL_PASSWORD_1]@host/x');
+    expect(scrub('postgres://[admin]:Pa#ss@host/x').text).toBe('postgres://[admin]:[URL_PASSWORD_1]@host/x');
+    for (const secret of ['#Secret1', '/abcSecret', '?abc'])
+      expect(scrub(`postgres://app:${secret}@db/x`).text).toBe('postgres://app:[URL_PASSWORD_1]@db/x');
+  });
+
+  it('a / in a password in JSON that escapes slashes is masked with the rest (found by the verifier)', () => {
+    const php = JSON.stringify({ u: 'postgres://app:ab/cd@db.internal/x' }).replaceAll('/', '\\/');
+    expect(JSON.parse(scrub(php).text)).toEqual({ u: 'postgres://app:[URL_PASSWORD_1]@db.internal/x' });
+  });
+
   it('a port, an IPv6 host or a path with an address is not read as a password', () => {
     for (const line of [
       'http://localhost:8080/login?next=/x&email=a@b.co',
@@ -251,7 +263,7 @@ describe('passwords in URLs (issue #3)', () => {
       'postgres://:aaaa/AAAAAAAA@aa&token=',
       FAKE.JWT,
       '-a@a.aa',
-    )}`;
+    )} postgres://app:hunter2@db,[URL_PASSWORD_1],${FAKE.EMAIL} x://u:pw@h[URL_PASSWORD_1]b@c.co`;
     expect(scrub(scrub(input).text).findings).toEqual([]);
   });
 
@@ -268,18 +280,38 @@ describe('passwords in URLs (issue #3)', () => {
     expect(scrub('postgres://u:ab/c@d@host/db').text).toBe('postgres://u:[URL_PASSWORD_1]@d@host/db');
   });
 
-  it('known limit: a password holding the text [URL_PASSWORD_N] is not masked (it reads as scrubbed output)', () => {
-    expect(scrub('postgres://u:pa[URL_PASSWORD_1]ss@host/db').findings).toEqual([]);
+  it('known limit: a password starting with the text [URL_PASSWORD_N] is not masked (it reads as scrubbed output)', () => {
+    expect(scrub('postgres://u:[URL_PASSWORD_1]ss@host/db').findings).toEqual([]);
+    expect(scrub('postgres://u:pa[URL_PASSWORD_1]ss@host/db').text).toBe('postgres://u:[URL_PASSWORD_2][URL_PASSWORD_1][URL_PASSWORD_3]@host/db');
+  });
+
+  it('known limit: a password holding :// is not masked', () => {
+    expect(scrub('postgres://app:a://b@host').findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  });
+
+  it('known limit: a port that is not digits, or empty, with an @ later in the path is masked as a password', () => {
+    expect(scrub('http://host:port/path?to=a@b.co').text).toBe('http://host:[URL_PASSWORD_1]@b.co');
+    expect(scrub('http://host:/path?to=a@b.co').text).toBe('http://host:[URL_PASSWORD_1]@b.co');
   });
 
   it('known limit: user:password@host with no scheme is not detected', () => {
     expect(scrub(`curl -u app:${pw}@db`).findings).toEqual([]);
   });
 
-  it('known limit: text glued to the host by , = or ; and holding a later @ is masked with the password', () => {
+  it('known limit: an address glued to the host by , = ; or : is masked with the password, leaving its domain', () => {
     const { text, map } = scrub(`postgres://app:${pw}@db,${FAKE.EMAIL}`);
     expect(text).toBe('postgres://app:[URL_PASSWORD_1]@example.com');
     expect(map['[URL_PASSWORD_1]']).toBe(`${pw}@db,jane.doe`);
+    // Found by the test generator.
+    expect(scrub('postgres://:AAAAAAAAAAAA@aa:a@a.aa ').text).toBe('postgres://:[URL_PASSWORD_1]@a.aa ');
+  });
+});
+
+describe('known limit: keys joined by a character of their own alphabet', () => {
+  it('a key that may hold _ runs on through it into the next key, leaving that key\'s tail visible (found by the test generator)', () => {
+    const sendgrid = FAKE.SENDGRID_KEY;
+    // `_SG` joins the Anthropic key; `.<id>.<secret>` stays visible.
+    expect(scrub(`${FAKE.ANTHROPIC_KEY}_${sendgrid}`).text).toBe(`[ANTHROPIC_KEY_1]${sendgrid.slice(2)}`);
   });
 });
 

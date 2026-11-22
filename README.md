@@ -91,12 +91,18 @@ streaming and the CLI.
   or a backslash (other than `\\` and `\uXXXX` for a non-ASCII letter in JSON) is not masked. URL parsers require
   those characters to be percent-encoded (`%20`, `%22`), and an encoded password is masked.
 - A raw `/`, `?` or `#` in a password is masked, except when everything between the `:` and that character is
-  digits, which reads as a port (`postgres://u:1234/x@host`), or the host is an IPv6 literal (`http://[::1]:…`).
-  Such a password that also holds a raw `@` is masked only up to that `@`.
-- A URL password holding the text `[URL_PASSWORD_N]` is not masked: it reads as already-scrubbed output.
+  digits, which reads as a port (`postgres://u:1234/x@host`), or that `:` is inside an IPv6 host
+  (`http://[::1]:…`). Such a password that also holds a raw `@` is masked only up to that `@`. The other way round, a
+  port that is not digits, or empty, followed by an `@` later in the path (`http://host:port/?to=a@b.co`), is masked
+  as a password up to that `@` (over-masking).
+- A URL password starting with the text `[URL_PASSWORD_N]` (it reads as already-scrubbed output), or holding `://`,
+  is not masked.
 - A URL's password runs to the last `@` before the host ends, as URL parsers read it. Text glued to the host by
-  `,`, `;` or `=` with no space, and holding a later `@` (`…@db,jane@example.com`), is masked with the password,
-  host included (over-masking, not a leak).
+  `,`, `;`, `=` or `:` with no space, and holding a later `@` (`…@db,jane@example.com`), is masked with the password,
+  host included; an address glued on that way loses its name into the mask and its domain stays visible.
+- A key whose own characters include `_` or `-` (Anthropic, OpenAI, GitLab, Slack, SendGrid) runs on through a `_` or
+  `-` into whatever follows. When that is another key with a `.` in it (`sk-ant-…_SG.….…`), the part after the dot
+  stays visible.
 - `user:password@host` with no `scheme://` in front (`curl -u`, some config formats) is not detected.
 - A private key block is masked from BEGIN to the next END line within 64 KB, even when the BEGIN belonged to a
   truncated paste and the END to a later block: everything in between is masked too (over-masking, not a leak).
@@ -114,7 +120,7 @@ streaming and the CLI.
 | Each format above is masked with its typed placeholder | `test/scrub.test.ts`: "every built-in detector" |
 | The boundary cases above, JSON validity, and complete PGP/PEM blocks with armour lines (also in PHP-style `\/` JSON) | `test/scrub.test.ts`: "token boundaries", "private key blocks" |
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
-| In generated documents (fake keys of every format, armoured key blocks, emails, URLs with passwords, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid | `test/properties.test.ts` |
+| In generated documents (fake keys of every format, armoured key blocks, emails, URLs with passwords, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid; separated by whitespace, quotes or escapes, every character of every planted value is inside a mask | `test/properties.test.ts` |
 | URL passwords: any scheme, only the password masked, encoded passwords and ones holding a raw `@`, `:`, `/`, `?` or `#`, ports, IPv6 hosts and path or query look-alikes kept, JSON (slash-escaped, `\u`-escaped, nested) stays valid, a key as the user name or inside the password keeps its type and does not hide the password, and the limits above | `test/scrub.test.ts`: "passwords in URLs" |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
 | Scan time stays linear: twenty crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; under 40 ms and 140–200 ms on an M-series laptop) |

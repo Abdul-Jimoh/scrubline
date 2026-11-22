@@ -203,10 +203,8 @@ interface AuthorityScan {
   colon: number;
   /** The `@` that ends the userinfo, or -1. */
   at: number;
-  /** Claimed text and placeholders: kept out of the mask, but scanned past. */
-  opaque: [number, number][];
-  /** Index of the first `[URL_PASSWORD_N]` placeholder, or -1. */
-  maskedPassword: number;
+  /** Claimed text and placeholders: kept out of the mask, but scanned past. `true` marks a `[URL_PASSWORD_N]`. */
+  opaque: [number, number, boolean][];
   /** Where the scan stopped, and whether on `/`, `?` or `#`. */
   end: number;
   atPathStart: boolean;
@@ -223,28 +221,37 @@ interface AuthorityScan {
  * the output again sees placeholders where the first pass saw claimed text, so it finds nothing new.
  */
 function scanAuthority(input: string, k: number, pastPath: boolean): AuthorityScan {
-  const scan: AuthorityScan = { colon: -1, at: -1, opaque: [], maskedPassword: -1, end: k, atPathStart: false };
+  const scan: AuthorityScan = { colon: -1, at: -1, opaque: [], end: k, atPathStart: false };
   for (; k < input.length; k++) {
     const c = input.charCodeAt(k);
     if (c === 0 || (c === 92 && input.charCodeAt(k + 1) === 0)) {
       const from = k;
       if (c === 92) k++;
       while (input.charCodeAt(k + 1) === 0) k++;
-      scan.opaque.push([from, k + 1]);
+      scan.opaque.push([from, k + 1, false]);
       continue;
     }
     if (c === 91 /* [ */) {
       PLACEHOLDER_AT.lastIndex = k;
       if (PLACEHOLDER_AT.test(input)) {
-        scan.opaque.push([k, PLACEHOLDER_AT.lastIndex]);
-        if (scan.maskedPassword === -1 && input.startsWith('[URL_PASSWORD_', k)) scan.maskedPassword = k;
+        scan.opaque.push([k, PLACEHOLDER_AT.lastIndex, input.startsWith('[URL_PASSWORD_', k)]);
         k = PLACEHOLDER_AT.lastIndex - 1;
         continue;
       }
     }
+    if (c === 92 && input[k + 1] === '/') {
+      // `\/`: a `/` in JSON that escapes slashes (PHP).
+      if (!pastPath) {
+        scan.atPathStart = true;
+        break;
+      }
+      if (input[k - 1] === ':' && input.startsWith('\\/\\/', k)) break; // the next URL
+      k++;
+      continue;
+    }
     if (c === 92 /* \ */) {
       // In a JSON string, `\\` is a backslash and `\u00e9` a non-ASCII letter (Python's json.dumps writes them so).
-      // Any other escape (`\"`, `\n`, `\/`) ends the URL: `\"` most often closes an inner JSON string, and reading
+      // Any other escape (`\"`, `\n`) ends the URL: `\"` most often closes an inner JSON string, and reading
       // past it ran into the next field. Trade-off: a password holding a `"` in JSON-encoded text is not masked.
       if (input[k + 1] === '\\') {
         k++;
@@ -285,32 +292,47 @@ function scanAuthority(input: string, k: number, pastPath: boolean): AuthoritySc
  *
  * A raw `/`, `?` or `#` in a password (`Pa#ss`, or base64 `ab/cd==`) ends the authority for a URL parser, but people
  * write them. When the authority has a `:` and no `@`, the scan reads on to the first `@`. Trade-offs: it does not
- * when the text between `:` and the `/`, `?` or `#` is all digits, which is read as a port
- * (`http://host:8080/?to=a@b.co`), or when the host is an IPv6 literal (`http://[::1]:80/…`); so the password
- * `u:1234/x@host` is not masked. And a password with such a character and also a raw `@` is masked only up to that `@`.
+ * when the text between `:` and the `/`, `?` or `#` is one or more digits, which is read as a port
+ * (`http://host:8080/?to=a@b.co`), or when that `:` is inside an IPv6 host (`http://[::1]:80/…`); so the password
+ * `u:1234/x@host` is not masked. A password with such a character and also a raw `@` is masked only up to that `@`.
+ * Over-masking the other way: a port that is not digits, or empty, followed by an `@` later in the path
+ * (`http://host:port/?to=jane@b.co`), is masked as a password up to that `@`.
  *
- * Each scan stops at the next `://`, so the search stays linear.
+ * Each scan stops at the next `://`, so the search stays linear. Trade-off: a password holding `://` is not masked.
  */
+/**
+ * Whether the password starting at `p` is scrubbed output: a `[URL_PASSWORD_N]` comes first, after any keys masked
+ * before it. A password read past its path (`[URL_PASSWORD_1]@aa&t=…@b.co`) would otherwise be read to a later `@`
+ * the second time. Trade-off: a password starting with the text `[URL_PASSWORD_N]` is not masked.
+ */
+function alreadyMasked(opaque: readonly [number, number, boolean][], p: number): boolean {
+  for (const [s, e, isPassword] of opaque) {
+    if (e <= p) continue;
+    if (s !== p) return false;
+    if (isPassword) return true;
+    p = e;
+  }
+  return false;
+}
+
 function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
   for (const m of input.matchAll(URL_SEPARATOR)) {
     if (m.index === 0 || !SCHEME_CHAR.test(input[m.index - 1]!)) continue;
     const from = m.index + m[0].length;
     const scan = scanAuthority(input, from, false);
-    let { at, opaque, maskedPassword } = scan;
+    let { at, opaque } = scan;
     const { colon } = scan;
-    if (at === -1 && colon !== -1 && scan.atPathStart && input[from] !== '[' && !/^[0-9]*$/.test(input.slice(colon + 1, scan.end))) {
+    const port = /^[0-9]+$/.test(input.slice(colon + 1, scan.end));
+    const ipv6 = input[from] === '[' && !input.slice(from, colon).includes(']');
+    if (at === -1 && colon !== -1 && scan.atPathStart && !port && !ipv6) {
       const more = scanAuthority(input, scan.end, true);
       if (more.at !== -1) {
         at = more.at;
         opaque = opaque.concat(more.opaque);
-        if (maskedPassword === -1) maskedPassword = more.maskedPassword;
       }
     }
     if (colon === -1 || at <= colon) continue;
-    // Already masked: this is scrubbed output. A password read past its path (`[URL_PASSWORD_1]@aa&t=…@b.co`) would
-    // otherwise be read to a later `@` the second time. Trade-off: a password holding the text `[URL_PASSWORD_N]` is
-    // not masked.
-    if (maskedPassword > colon && maskedPassword < at) continue;
+    if (alreadyMasked(opaque, colon + 1)) continue;
     // The password, without the claimed text and placeholders inside it.
     let p = colon + 1;
     for (const [s, e] of opaque) {
