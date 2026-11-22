@@ -87,9 +87,13 @@ streaming and the CLI.
 - URL-encoded addresses with no literal `@` (`?email=jane%40example.com`) are not detected.
 - In plain text, a mask right after a lone backslash (`DOMAIN\jane@…`) includes the backslash, so that value gets
   its own placeholder, separate from the same address elsewhere, and `restore` puts the backslash back with it.
-- A URL password holding a raw space, `"`, `<`, `>`, `` ` ``, `{`, `}`, `|`, a backslash (other than `\"` and `\\` in
-  JSON) or a placeholder-shaped `[KIND_N]` is not masked. URL parsers require those characters to be
-  percent-encoded (`%20`, `%22`), and an encoded password is masked.
+- A URL password holding whitespace, a control character, `"` (also `\"` in JSON), `<`, `>`, `` ` ``, `{`, `}`, `|`
+  or a backslash (other than `\\` and `\uXXXX` for a non-ASCII letter in JSON) is not masked. URL parsers require
+  those characters to be percent-encoded (`%20`, `%22`), and an encoded password is masked.
+- A raw `/`, `?` or `#` in a password is masked, except when everything between the `:` and that character is
+  digits, which reads as a port (`postgres://u:1234/x@host`), or the host is an IPv6 literal (`http://[::1]:…`).
+  Such a password that also holds a raw `@` is masked only up to that `@`.
+- A URL password holding the text `[URL_PASSWORD_N]` is not masked: it reads as already-scrubbed output.
 - A URL's password runs to the last `@` before the host ends, as URL parsers read it. Text glued to the host by
   `,`, `;` or `=` with no space, and holding a later `@` (`…@db,jane@example.com`), is masked with the password,
   host included (over-masking, not a leak).
@@ -111,9 +115,9 @@ streaming and the CLI.
 | The boundary cases above, JSON validity, and complete PGP/PEM blocks with armour lines (also in PHP-style `\/` JSON) | `test/scrub.test.ts`: "token boundaries", "private key blocks" |
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
 | In generated documents (fake keys of every format, armoured key blocks, emails, URLs with passwords, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid | `test/properties.test.ts` |
-| URL passwords: any scheme, only the password masked, encoded and `@`-holding passwords, no-password and path/query look-alikes kept, JSON (also slash-escaped) stays valid, a key as the password keeps its type, and the limits above | `test/scrub.test.ts`: "passwords in URLs" |
+| URL passwords: any scheme, only the password masked, encoded passwords and ones holding a raw `@`, `:`, `/`, `?` or `#`, ports, IPv6 hosts and path or query look-alikes kept, JSON (slash-escaped, `\u`-escaped, nested) stays valid, a key as the user name or inside the password keeps its type and does not hide the password, and the limits above | `test/scrub.test.ts`: "passwords in URLs" |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
-| Scan time stays linear: sixteen crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; 5–20 ms and 140–200 ms on an M-series laptop) |
+| Scan time stays linear: twenty crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; under 40 ms and 140–200 ms on an M-series laptop) |
 | A 12 MB key block with no END line is masked rather than throwing | `test/performance.test.ts`: "very large input" |
 
 Every key in the tests is fake and is assembled at runtime, so the repository never holds a complete key-shaped string.

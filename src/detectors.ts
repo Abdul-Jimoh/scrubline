@@ -186,51 +186,140 @@ const URL_SEPARATOR = /:(?:\/\/|\\\/\\\/)/g;
  */
 const SCHEME_CHAR = /[A-Za-z0-9+.\0-]/;
 const PLACEHOLDER_AT = /\[[A-Z][A-Z0-9_]*_\d+\]/y;
+const HEX4 = /[0-9A-Fa-f]{4}/y;
 /**
- * Characters that end a URL's authority (`user:password@host:port`): the start of the path, query or fragment, and
- * characters that end a URL in running text or a JSON string. Trade-off: a password that holds one of these raw
- * (whitespace, `"`, `<`, `>`, `` ` ``, `{`, `}`, `|`) is not masked, because the scan stops before its `@`. URL
- * parsers require them to be percent-encoded, which is masked.
+ * Characters that end a URL wherever they appear: they end it in running text or a JSON string. Trade-off: a password
+ * that holds one raw (whitespace or a control character, `"`, `<`, `>`, `` ` ``, `{`, `}`, `|`) is not masked,
+ * because the scan stops before its `@`. URL parsers require them to be percent-encoded, which is masked.
  */
-const AUTHORITY_END = new Uint8Array(128);
-for (let c = 0; c <= 32; c++) AUTHORITY_END[c] = 1; // whitespace and control characters, including `\0` (claimed)
-for (const c of '/?#"<>`{}|\x7f') AUTHORITY_END[c.charCodeAt(0)] = 1;
+const URL_END = new Uint8Array(128);
+for (let c = 1; c <= 32; c++) URL_END[c] = 1;
+for (const c of '"<>`{}|\x7f') URL_END[c.charCodeAt(0)] = 1;
+/** Where the authority ends and the path, query or fragment begins: `/`, `?`, `#`. */
+const isPathStart = (c: number) => c === 47 || c === 63 || c === 35;
+
+interface AuthorityScan {
+  /** First `:` outside opaque ranges, or -1. */
+  colon: number;
+  /** The `@` that ends the userinfo, or -1. */
+  at: number;
+  /** Claimed text and placeholders: kept out of the mask, but scanned past. */
+  opaque: [number, number][];
+  /** Index of the first `[URL_PASSWORD_N]` placeholder, or -1. */
+  maskedPassword: number;
+  /** Where the scan stopped, and whether on `/`, `?` or `#`. */
+  end: number;
+  atPathStart: boolean;
+}
 
 /**
- * Passwords in URLs: `scheme://user:password@host`. Only the password is masked. The userinfo ends at the last `@`
- * before the authority ends, as URL parsers read it, so a raw `@` in a password (`p@ss`) stays inside the mask.
- * Trade-off: text glued to the URL by punctuation a userinfo may hold (`=`, `,`, `;`) and containing a later `@`
- * (`…@host,a@b.co`) is masked as part of the password, host included (over-masking, not a leak).
+ * Scans a URL authority from `k`. Normally it stops at the path, and the userinfo runs to the last `@` before it,
+ * as URL parsers read it (a raw `@` in a password stays inside the mask). With `pastPath`, it reads on through `/`,
+ * `?` and `#` to the first `@`, stopping at the next `://`.
  *
- * The scan stops at a placeholder (`[GITHUB_TOKEN_1]`) or claimed text, so a key used as the password keeps its own
- * type and scrubbing the output again finds nothing new. Trade-off: a password that holds a placeholder-shaped
- * `[KIND_N]` is not masked. Each scan stops at the `/` of the next `://`, so the search stays linear.
+ * Claimed text (`\0`, with a backslash a claimed span took with it) and placeholders (`[AWS_KEY_1]`) are scanned past
+ * and recorded, not treated as an end: a key as the user name (`s3n://AKIA…:<secret>@bucket`) must not hide the
+ * password after it, and a key inside a password keeps its own type while the rest is masked around it. Scrubbing
+ * the output again sees placeholders where the first pass saw claimed text, so it finds nothing new.
+ */
+function scanAuthority(input: string, k: number, pastPath: boolean): AuthorityScan {
+  const scan: AuthorityScan = { colon: -1, at: -1, opaque: [], maskedPassword: -1, end: k, atPathStart: false };
+  for (; k < input.length; k++) {
+    const c = input.charCodeAt(k);
+    if (c === 0 || (c === 92 && input.charCodeAt(k + 1) === 0)) {
+      const from = k;
+      if (c === 92) k++;
+      while (input.charCodeAt(k + 1) === 0) k++;
+      scan.opaque.push([from, k + 1]);
+      continue;
+    }
+    if (c === 91 /* [ */) {
+      PLACEHOLDER_AT.lastIndex = k;
+      if (PLACEHOLDER_AT.test(input)) {
+        scan.opaque.push([k, PLACEHOLDER_AT.lastIndex]);
+        if (scan.maskedPassword === -1 && input.startsWith('[URL_PASSWORD_', k)) scan.maskedPassword = k;
+        k = PLACEHOLDER_AT.lastIndex - 1;
+        continue;
+      }
+    }
+    if (c === 92 /* \ */) {
+      // In a JSON string, `\\` is a backslash and `\u00e9` a non-ASCII letter (Python's json.dumps writes them so).
+      // Any other escape (`\"`, `\n`, `\/`) ends the URL: `\"` most often closes an inner JSON string, and reading
+      // past it ran into the next field. Trade-off: a password holding a `"` in JSON-encoded text is not masked.
+      if (input[k + 1] === '\\') {
+        k++;
+        continue;
+      }
+      HEX4.lastIndex = k + 2;
+      if (input[k + 1] === 'u' && HEX4.test(input) && parseInt(input.slice(k + 2, k + 6), 16) >= 0x80) {
+        k += 5;
+        continue;
+      }
+      break;
+    }
+    if (c < 128 && URL_END[c]) break;
+    if (isPathStart(c)) {
+      if (!pastPath) {
+        scan.atPathStart = true;
+        break;
+      }
+      if (c === 47 && input[k - 1] === ':' && input[k + 1] === '/') break; // the next URL
+      continue;
+    }
+    if (c === 64 /* @ */) {
+      scan.at = k;
+      if (pastPath) {
+        k++;
+        break;
+      }
+    } else if (c === 58 /* : */ && scan.colon === -1) scan.colon = k;
+  }
+  scan.end = k;
+  return scan;
+}
+
+/**
+ * Passwords in URLs: `scheme://user:password@host`. Only the password is masked. Trade-off: text glued to the URL by
+ * punctuation a userinfo may hold (`=`, `,`, `;`) and containing a later `@` (`…@host,a@b.co`) is masked as part of
+ * the password, host included (over-masking, not a leak).
+ *
+ * A raw `/`, `?` or `#` in a password (`Pa#ss`, or base64 `ab/cd==`) ends the authority for a URL parser, but people
+ * write them. When the authority has a `:` and no `@`, the scan reads on to the first `@`. Trade-offs: it does not
+ * when the text between `:` and the `/`, `?` or `#` is all digits, which is read as a port
+ * (`http://host:8080/?to=a@b.co`), or when the host is an IPv6 literal (`http://[::1]:80/…`); so the password
+ * `u:1234/x@host` is not masked. And a password with such a character and also a raw `@` is masked only up to that `@`.
+ *
+ * Each scan stops at the next `://`, so the search stays linear.
  */
 function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
   for (const m of input.matchAll(URL_SEPARATOR)) {
     if (m.index === 0 || !SCHEME_CHAR.test(input[m.index - 1]!)) continue;
-    let colon = -1;
-    let at = -1;
-    for (let k = m.index + m[0].length; k < input.length; k++) {
-      const c = input.charCodeAt(k);
-      if (c < 128 && AUTHORITY_END[c]) break;
-      if (c === 92 /* \ */) {
-        // `\"` and `\\` are a quote and a backslash in a JSON string; any other escape (`\n`, `\/`) ends the URL.
-        if (input[k + 1] === '"' || input[k + 1] === '\\') {
-          k++;
-          continue;
-        }
-        break;
+    const from = m.index + m[0].length;
+    const scan = scanAuthority(input, from, false);
+    let { at, opaque, maskedPassword } = scan;
+    const { colon } = scan;
+    if (at === -1 && colon !== -1 && scan.atPathStart && input[from] !== '[' && !/^[0-9]*$/.test(input.slice(colon + 1, scan.end))) {
+      const more = scanAuthority(input, scan.end, true);
+      if (more.at !== -1) {
+        at = more.at;
+        opaque = opaque.concat(more.opaque);
+        if (maskedPassword === -1) maskedPassword = more.maskedPassword;
       }
-      if (c === 91 /* [ */) {
-        PLACEHOLDER_AT.lastIndex = k;
-        if (PLACEHOLDER_AT.test(input)) break;
-      }
-      if (c === 64 /* @ */) at = k;
-      else if (c === 58 /* : */ && colon === -1) colon = k;
     }
-    // An empty password (`redis://:@host`) has nothing to mask.
-    if (colon !== -1 && at > colon + 1) yield [colon + 1, at];
+    if (colon === -1 || at <= colon) continue;
+    // Already masked: this is scrubbed output. A password read past its path (`[URL_PASSWORD_1]@aa&t=…@b.co`) would
+    // otherwise be read to a later `@` the second time. Trade-off: a password holding the text `[URL_PASSWORD_N]` is
+    // not masked.
+    if (maskedPassword > colon && maskedPassword < at) continue;
+    // The password, without the claimed text and placeholders inside it.
+    let p = colon + 1;
+    for (const [s, e] of opaque) {
+      if (e <= p) continue;
+      if (s >= at) break;
+      if (s > p) yield [p, s];
+      p = e;
+    }
+    if (p < at) yield [p, at];
   }
 }
 

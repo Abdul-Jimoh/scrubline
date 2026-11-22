@@ -172,13 +172,15 @@ describe('passwords in URLs (issue #3)', () => {
       expect(scrub(line).findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
   });
 
-  it('masks a password in JSON, including JSON that escapes slashes or quotes, and the JSON stays valid', () => {
-    const json = JSON.stringify({ url: `postgres://app:${pw}@db/x`, quoted: 'postgres://app:pa"ss@db/x', next: 'kept' });
+  it('masks a password in JSON, including JSON that escapes slashes or non-ASCII letters, and the JSON stays valid', () => {
+    const json = JSON.stringify({ url: `postgres://app:${pw}@db/x`, back: 'postgres://app:pa\\ss@db/x', next: 'kept' });
     expect(JSON.parse(scrub(json).text)).toEqual({
       url: 'postgres://app:[URL_PASSWORD_1]@db/x',
-      quoted: 'postgres://app:[URL_PASSWORD_2]@db/x',
+      back: 'postgres://app:[URL_PASSWORD_2]@db/x',
       next: 'kept',
     });
+    // Python's json.dumps writes é as \u00e9 (found by the verifier).
+    expect(scrub('{"url": "postgres://app:p\\u00e9ss@host/x"}').text).toBe('{"url": "postgres://app:[URL_PASSWORD_1]@host/x"}');
     const php = json.replaceAll('/', '\\/');
     expect(JSON.parse(scrub(php).text).url).toBe('postgres://app:[URL_PASSWORD_1]@db/x');
   });
@@ -187,6 +189,52 @@ describe('passwords in URLs (issue #3)', () => {
     expect(scrub(`https://x-access-token:${FAKE.GITHUB_TOKEN}@github.com/org/repo.git`).text).toBe(
       'https://x-access-token:[GITHUB_TOKEN_1]@github.com/org/repo.git',
     );
+  });
+
+  it('a key as the user name does not hide the password (found by the verifier)', () => {
+    // An AWS key ID and secret in an s3n:// or s3a:// URL, as Hadoop configs write them, also percent-encoded.
+    const secret = j('wJalrXUtnFEMI', '%2FK7MDENG%2F', 'bPxRfiCYEXAMPLEKEY');
+    expect(scrub(`s3n://${FAKE.AWS_KEY}:${secret}@bucket/path`).text).toBe('s3n://[AWS_KEY_1]:[URL_PASSWORD_1]@bucket/path');
+    expect(JSON.parse(scrub(JSON.stringify({ fs: `s3a://${FAKE.AWS_KEY}:${secret}@bucket` })).text)).toEqual({
+      fs: 's3a://[AWS_KEY_1]:[URL_PASSWORD_1]@bucket',
+    });
+    expect(scrub(`https://${FAKE.JWT}:${pw}@host/x`).text).toBe('https://[JWT_1]:[URL_PASSWORD_1]@host/x');
+    expect(scrub(`https://${FAKE.GITHUB_TOKEN}:${pw}@localhost/x`).text).toBe('https://[GITHUB_TOKEN_1]:[URL_PASSWORD_1]@localhost/x');
+    expect(scrub(`postgres://[USER_1]:${pw}@host/x`).text).toBe('postgres://[USER_1]:[URL_PASSWORD_1]@host/x');
+  });
+
+  it('a key inside a password keeps its type, and the rest of the password is masked around it (found by the verifier)', () => {
+    const { text, map } = scrub(`postgres://app:xx-${FAKE.GITHUB_TOKEN}@host/x and postgres://app:${FAKE.AWS_KEY}!tail@host/x`);
+    expect(text).toBe('postgres://app:[URL_PASSWORD_1][GITHUB_TOKEN_1]@host/x and postgres://app:[AWS_KEY_1][URL_PASSWORD_2]@host/x');
+    expect(map['[URL_PASSWORD_1]']).toBe('xx-');
+    expect(map['[URL_PASSWORD_2]']).toBe('!tail');
+    // A placeholder-shaped text in a password is left as typed, so restore stays exact.
+    const input = `postgres://app:pa[EMAIL_1]ss@db/x`;
+    const r = scrub(input);
+    expect(r.text).toBe('postgres://app:[URL_PASSWORD_1][EMAIL_1][URL_PASSWORD_2]@db/x');
+    expect(restore(r.text, r.map)).toBe(input);
+  });
+
+  it('masks a password holding a raw #, ? or / (found by the verifier)', () => {
+    for (const secret of ['Pa#ssw0rd', 'Pa?ss', 'ab/cd+ef==', 'a/b?c#d'])
+      expect(scrub(`mysql://root:${secret}@localhost:3306/app?x=1`).text).toBe('mysql://root:[URL_PASSWORD_1]@localhost:3306/app?x=1');
+    expect(scrub('redis://:Pa#ss@cache:6379').text).toBe('redis://:[URL_PASSWORD_1]@cache:6379');
+  });
+
+  it('a port, an IPv6 host or a path with an address is not read as a password', () => {
+    for (const line of [
+      'http://localhost:8080/login?next=/x&email=a@b.co',
+      'http://host:8080?to=a@b.co',
+      'http://[::1]:80/x?e=a@b.co',
+      'https://example.com/a:b/c@d',
+    ])
+      expect(scrub(line).findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  });
+
+  it('JSON inside a JSON string does not run one URL into the next field (found by the verifier)', () => {
+    const inner = JSON.stringify({ url: 'postgres://app@host', email: FAKE.EMAIL });
+    const out = scrub(JSON.stringify(inner)).text;
+    expect(JSON.parse(JSON.parse(out))).toEqual({ url: 'postgres://app@host', email: '[EMAIL_1]' });
   });
 
   it('masks the password when a key glued to the scheme claims the scheme too (found by the test generator)', () => {
@@ -198,21 +246,30 @@ describe('passwords in URLs (issue #3)', () => {
   });
 
   it('scrubbing the output again finds nothing new', () => {
-    const input = `postgres://app:${pw}@db/x https://u:x${FAKE.GITHUB_TOKEN}@h postgres://u:p@h,${FAKE.EMAIL}`;
+    const input = `postgres://app:${pw}@db/x https://u:x${FAKE.GITHUB_TOKEN}@h postgres://u:p@h,${FAKE.EMAIL} ${j(
+      // Found by the test generator: a password read past its path, then a key and a later @.
+      'postgres://:aaaa/AAAAAAAA@aa&token=',
+      FAKE.JWT,
+      '-a@a.aa',
+    )}`;
     expect(scrub(scrub(input).text).findings).toEqual([]);
   });
 
   // Known limits (README): the trade-offs named in findUrlPasswords, pinned here.
-  it('known limit: a password holding a raw space, quote or placeholder is not masked', () => {
-    for (const line of [
-      'postgres://app:pa ss@db/x',
-      'postgres://app:pa"ss@db/x',
-      'postgres://app:pa<ss@db/x',
-      'postgres://app:pa|ss@db/x',
-      'postgres://app:pa\\qss@db/x',
-      'postgres://app:pa[EMAIL_1]ss@db/x',
-    ])
-      expect(scrub(line).findings).toEqual([]);
+  it('known limit: a password holding whitespace, a control character, a quote, <>`{}| or a backslash is not masked', () => {
+    for (const ch of [' ', '\t', '\x01', '"', '<', '>', '`', '{', '}', '|', '\\q', '\x7f'])
+      expect(scrub(`postgres://app:pa${ch}ss@db/x`).findings).toEqual([]);
+    // A quote in JSON-encoded text, written \".
+    expect(scrub(JSON.stringify({ u: 'postgres://app:pa"ss@db/x' })).findings).toEqual([]);
+  });
+
+  it('known limit: a password that is all digits before a /, ? or # is read as a port; one with / and @ is cut at the @', () => {
+    expect(scrub('postgres://u:1234/x@host/db').findings).toEqual([]);
+    expect(scrub('postgres://u:ab/c@d@host/db').text).toBe('postgres://u:[URL_PASSWORD_1]@d@host/db');
+  });
+
+  it('known limit: a password holding the text [URL_PASSWORD_N] is not masked (it reads as scrubbed output)', () => {
+    expect(scrub('postgres://u:pa[URL_PASSWORD_1]ss@host/db').findings).toEqual([]);
   });
 
   it('known limit: user:password@host with no scheme is not detected', () => {

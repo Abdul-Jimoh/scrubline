@@ -30,6 +30,11 @@ const adversarial: [string, string][] = [
   ['URLs back to back, each with a password', 'a://b:c@d'.repeat(N / 9)],
   ['URL separators escaped for JSON, back to back', 'a:\\/\\/b:@'.repeat(N / 10)],
   ['an authority full of placeholder-like brackets that never close', 'a://u:' + '[A_1_1_1'.repeat(N / 8) + '@h'],
+  // A password may hold a raw /, ? or #, so these scans read on past the path; each must stop at the next ://.
+  ['URLs back to back, each read past its path', 'a://u:x/'.repeat(N / 8)],
+  ['one URL read past its path through a long run with no @', 'a://u:x/' + 'b/'.repeat(N / 2)],
+  ['an authority of placeholders, scanned past', 'a://' + '[A_1]'.repeat(N / 5) + ':p@h'],
+  ['keys and colons in one authority', j(FAKE.AWS_KEY, ':').repeat(N / 21) + '@h'],
 ];
 
 describe('scan time stays linear on crafted input', () => {

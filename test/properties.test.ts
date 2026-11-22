@@ -69,9 +69,14 @@ const whole = fc.oneof(
  */
 const urlWithPassword = fc
   .tuple(
-    fc.constantFrom('postgres', 'postgresql', 'mongodb+srv', 'redis', 'amqp', 'https'),
-    chars(LOW + DIG, 0, 8),
-    chars(ALNUM + "!$&'()*+,;=~._-%@:", 12, 24),
+    fc.constantFrom('postgres', 'postgresql', 'mongodb+srv', 'redis', 'amqp', 'https', 's3n'),
+    // The user name may be empty, or a key (an AWS key ID in an s3n:// URL).
+    fc.oneof(chars(LOW + DIG, 0, 8), cat(fc.constantFrom('AKIA', 'ASIA'), chars(UP + DIG, 16))),
+    fc.oneof(
+      chars(ALNUM + "!$&'()*+,;=~._-%@:", 12, 24),
+      // A raw /, ? or # (base64, or typed by hand), which URL parsers would read as the end of the authority.
+      cat(chars(LOW, 4, 8), fc.constantFrom('/', '?', '#'), chars(ALNUM + '/?#+=', 8, 16)),
+    ),
     chars(LOW, 2, 10),
     fc.constantFrom('', '.internal', '.example.com'),
     fc.constantFrom('', ':5432', '/db', ':6379/0?ssl=true'),
