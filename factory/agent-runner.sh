@@ -8,7 +8,8 @@
 #   3. runs `npm run check` itself, and gives the agent the failure up to MAX_ATTEMPTS times;
 #   4. pushes the branch and opens a PR with the ticket link and acceptance criteria;
 #   5. waits for Qodo's review of the exact head commit, and if findings are open, gives them to the agent
-#      (factory/prompts/fix-review.md), checks again and pushes, up to MAX_REVIEW_ROUNDS times;
+#      (factory/prompts/fix-review.md), checks again (with the same MAX_ATTEMPTS retries) and pushes, up to
+#      MAX_REVIEW_ROUNDS times;
 #   6. stops with label `agent-needs-help` and a comment on the issue whenever a limit is hit or something fails.
 # It never merges: the human does. Text the agent wrote is scrubbed with Scrubline before it is posted.
 # One installation per repository: the lock is local, so two machines running this could claim the same ticket.
@@ -114,6 +115,9 @@ run_agent() {
 # message to commit-msg.txt, and the runner commits (`commit_staged`). In the first live run the agent's commits were
 # denied by a too-narrow allow rule; allowing every `git commit` form instead would let flags such as `-n` skip the
 # repository's commit hooks, which no deny pattern reliably blocks.
+# Claude Code's default commit and PR attribution is turned off for the session: the repository's commit-msg hook
+# refuses AI attribution, and in the third live run the default trailer made the runner's commit fail twice.
+AGENT_SETTINGS='{"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""}}'
 agent() {
   local prompt="$1" out="$2"
   [ -n "$prompt" ] || needs_help "empty prompt"
@@ -121,6 +125,7 @@ agent() {
   (cd "$WT" && perl -e 'alarm shift; exec @ARGV' "$AGENT_TIMEOUT" \
     claude -p "$prompt" \
       --add-dir "$RUN_DIR" \
+      --settings "$AGENT_SETTINGS" \
       --permission-mode acceptEdits \
       --allowedTools 'Read' 'Edit' 'Write' 'Grep' 'Glob' \
         'Bash(npm run check)' 'Bash(npm run typecheck)' 'Bash(npm test*)' 'Bash(npx vitest *)' 'Bash(npx tsc *)' \
@@ -173,6 +178,22 @@ checks_pass() {
   log "check $1: pass"
 }
 
+# Checks the staged work and, while that fails, gives the agent the failure (factory/prompts/fix-checks.md), up to
+# MAX_ATTEMPTS attempts. Used after the implement step and after every review fix round, so a refused commit or a
+# failing test in a review round gets the same retries as in the first one. $1 prefixes the check log names; $2 says
+# where in the run the limit was hit.
+checks_with_retries() {
+  ATTEMPT=1
+  until checks_pass "$1$ATTEMPT"; do
+    [ -s "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
+    [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] && needs_help "checks still failing after $MAX_ATTEMPTS attempts$2"
+    PREV="$1$ATTEMPT"
+    ATTEMPT=$((ATTEMPT + 1))
+    run_agent fix-checks.md "$RUN_DIR/agent-fix-checks-$1$ATTEMPT.json"
+  done
+  [ -s "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
+}
+
 # Prints the Qodo review of commit $1 as JSON once it is complete; returns 1 on timeout.
 wait_for_review() {
   local sha="$1" waited=0 nudged=0 out
@@ -218,21 +239,15 @@ mkdir -p "$SCRUBBER" && cp -R "$WT/dist/." "$SCRUBBER/" && printf '{ "type": "mo
 # --- Implement, with a retry limit ------------------------------------------------------------------------------
 ATTEMPT=1
 run_agent implement.md "$RUN_DIR/agent-implement.json"
-until checks_pass "$ATTEMPT"; do
-  [ -s "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
-  [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] && needs_help "checks still failing after $MAX_ATTEMPTS attempts"
-  PREV=$ATTEMPT
-  ATTEMPT=$((ATTEMPT + 1))
-  run_agent fix-checks.md "$RUN_DIR/agent-fix-checks-$ATTEMPT.json"
-done
-[ -s "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
+checks_with_retries "" ""
+IMPLEMENT_ATTEMPTS=$ATTEMPT
 
 # --- Open the PR (or reuse the one a stopped run left) ---------------------------------------------------------
 push || needs_help "git push failed"
 {
   echo "Ticket: $ISSUE_URL (closes #$ISSUE)"
   echo
-  echo "Opened by the scheduled agent (\`factory/agent-runner.sh\`, run \`$RUN_ID\`). \`npm run check\` passed on attempt $ATTEMPT of $MAX_ATTEMPTS. A human decides whether to merge."
+  echo "Opened by the scheduled agent (\`factory/agent-runner.sh\`, run \`$RUN_ID\`). \`npm run check\` passed on attempt $IMPLEMENT_ATTEMPTS of $MAX_ATTEMPTS. A human decides whether to merge."
   echo
   jq -r .body "$RUN_DIR/issue.json" | awk '/^## Acceptance criteria/{on=1; print; next} on && /^## /{exit} on'
   echo
@@ -267,7 +282,7 @@ while :; do
   ROUND=$((ROUND + 1))
   printf '%s\n' "$open" >"$RUN_DIR/findings-$ROUND.json"
   run_agent fix-review.md "$RUN_DIR/agent-fix-review-$ROUND.json"
-  checks_pass "review-$ROUND" || needs_help "checks failed after review fix round $ROUND"
+  checks_with_retries "review-$ROUND-" " in review fix round $ROUND"
   [ "$(git -C "$WT" rev-parse HEAD)" = "$SHA" ] && needs_help "the agent changed nothing for $count open finding(s); see its report"
   push || needs_help "git push failed"
 done

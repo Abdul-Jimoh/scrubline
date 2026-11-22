@@ -9,7 +9,7 @@ Your ticket is GitHub issue #{{ISSUE}}. Read it with `gh issue view {{ISSUE}}`. 
 4. Run `npm run check` until it passes.
 5. Stage every file of your change with `git add <files>`. Put any scratch file in `{{RUN_DIR}}`, never in the
    repository: you cannot delete files, and anything left unstaged fails the check.
-   Write the commit message to `{{RUN_DIR}}/commit-msg.txt`, with a first line ending in `(#{{ISSUE}})`. Do not
+   Write the commit message to `{{RUN_DIR}}/commit-msg.txt`, with a first line ending in `(#{{ISSUE}})`. No attribution lines (a co-author trailer naming an AI, "Generated with"): the repository's commit-msg hook refuses them. Do not
    commit, push, open a pull request, or comment on or edit any issue: the runner commits what you staged, checks it
    and does the rest.
 
