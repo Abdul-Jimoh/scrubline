@@ -16,6 +16,9 @@ untrusted. A missed secret is a leak that cannot be taken back.
 - `test/scrub.test.ts`: examples and regressions. `test/properties.test.ts`: fast-check properties on generated
   documents. `test/performance.test.ts`: crafted inputs that must scan in linear time.
 - `test/fixtures.ts`: one fake sample per detector (`FAKE`), assembled at runtime with `j()`.
+- `factory/`: the scheduled agent. `agent-runner.sh` takes the oldest open issue labelled `ready-for-agent`, runs a
+  headless coding agent on it with the prompts in `factory/prompts/`, checks, opens a PR, and works through Qodo's
+  findings within fixed retry limits; `install-schedule.sh` runs it every 15 minutes with launchd (macOS).
 
 ## Setup and checks
 

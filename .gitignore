@@ -8,6 +8,7 @@ coverage/
 *.md
 !README.md
 !AGENTS.md
+!factory/prompts/*.md
 !CHANGELOG.md
 !docs/evidence/**/*.md
 
