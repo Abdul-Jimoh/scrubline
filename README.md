@@ -84,6 +84,7 @@ Errors exit with code 2 and never show input text, map values, arguments or file
 | `GOOGLE_API_KEY`, `SLACK_TOKEN`, `STRIPE_KEY` | `AIza…`, `xox[abprs]-…`, `sk_live_`/`rk_live_`/`whsec_` |
 | `NPM_TOKEN`, `HUGGINGFACE_TOKEN`, `SENDGRID_KEY`, `DIGITALOCEAN_TOKEN`, `TELEGRAM_BOT_TOKEN` | their published formats |
 | `URL_PASSWORD` | the password in a URL or connection string (`postgres://app:[URL_PASSWORD_1]@db:5432/prod`); scheme, user, host and path stay readable |
+| `HOME_USER` | the user name in a home-directory path: `/Users/…`, `/home/…`, `C:\Users\…` on any drive, also as `C:/Users/…` and JSON-escaped `C:\\Users\\…` (`at (/Users/[HOME_USER_1]/app/index.js:3:9)`); the rest of the path stays readable, and shared folders (`Shared`, `Public`, `Default`, `All Users`) are kept |
 | `EMAIL` | email addresses (an SSH remote like `git@github.com:…` is kept) |
 
 Keys are found at token boundaries: after whitespace, punctuation, `_` or quotes; after an escape (`\n`, `\t`,
@@ -92,9 +93,14 @@ A complete private key block (BEGIN to END) is masked whatever its armour lines 
 stays valid JSON: no mask starts inside an escape, and a mask that would start right after an escaping backslash
 (`\n` + `pm_…`) takes the backslash with it. One exception is under Known limits.
 
+A home path is found only where a path starts: `/Users` or `/home` after whitespace, punctuation, a quote, an escape
+or `file://` (in any case), not inside another path (`/opt/home/x`, `foo/Users/x`); a drive letter not glued to a
+letter or digit, with `Users` in any case. The name runs to the next separator, whitespace, quote, `:` or the end of
+the text, and a dot that ends a sentence is left out; in JSON, a letter written as `\uXXXX` (ASCII or not) is part of
+it. The same name gets the same placeholder in every form of path. A Windows separator is kept outside the mask.
+
 Planned, not built yet, each an issue in the [backlog](https://github.com/Abdul-Jimoh/scrubline/issues): labelled
-secrets (`password=…`), phone and card numbers, IP addresses, home paths, high-entropy strings, custom rules
-and streaming.
+secrets (`password=…`), phone and card numbers, IP addresses, high-entropy strings, custom rules and streaming.
 
 ## Known limits
 
@@ -141,6 +147,12 @@ and streaming.
   quote that closes a JSON string.
 - A block whose BEGIN sits in a JSON object key and whose END comes later breaks that JSON (the key material is
   still masked). Between two string values the JSON stays valid, but the fields in between are masked with it.
+- A Windows user name holding a space, `'`, `(` or `)` (`C:\Users\Jane Doe`, `O'Brien`) is masked only up to that
+  character; the rest stays visible.
+- Home paths that are not detected: relative ones (`../home/jane`, `x//home/jane`), a Windows path that mixes `/` and
+  `\` (`C:/Users\jane`), `/Users` in another case (`/users/jane`; on Windows paths any case is matched), slash-escaped JSON (`\/home\/jane`), and other home roots (`~`, `/root`,
+  `C:\Documents and Settings\…`). A person whose user name is `shared`, `public` or `default` (in any case) is not
+  masked, and a name that really ends in `.` keeps that dot visible.
 
 ## How it is tested
 
@@ -151,11 +163,12 @@ and streaming.
 | Each format above is masked with its typed placeholder | `test/scrub.test.ts`: "every built-in detector" |
 | The boundary cases above, JSON validity, and complete PGP/PEM blocks with armour lines (also in PHP-style `\/` JSON) | `test/scrub.test.ts`: "token boundaries", "private key blocks" |
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
-| In generated documents (fake keys of every format, armoured key blocks, emails, URLs with passwords, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid; separated by whitespace, quotes or escapes, every character of every planted value is inside a mask | `test/properties.test.ts` |
+| In generated documents (fake keys of every format, armoured key blocks, emails, URLs with passwords, home paths in every form, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid; separated by whitespace, quotes or escapes, every character of every planted value is inside a mask | `test/properties.test.ts` |
 | URL passwords: any scheme, only the password masked, encoded passwords and ones holding a raw `@`, `:`, `/`, `?` or `#`, ports, IPv6 hosts and path or query look-alikes kept, JSON (slash-escaped, `\u`-escaped, nested) stays valid, a key as the user name or inside the password keeps its type and does not hide the password, and the limits above | `test/scrub.test.ts`: "passwords in URLs" |
+| Home paths: `/Users`, `/home`, `X:\Users` on any drive, `X:/Users`, JSON-escaped and JSON inside JSON; at the end of a path; shared folders and an empty `/home/` kept; `Users` and `file://` in any case; names written with `\uXXXX` escapes in JSON; only at a path boundary (and after `file://`, an escape, or a key that ran into the drive letter); one placeholder per name across forms; restore and JSON validity; the limits above | `test/scrub.test.ts`: "home-directory paths" |
 | The CLI: bytes kept (BOM, CRLF, non-ASCII, no final newline), file or stdin, the map file (mode 0600 new or rewritten, merged across runs and across 8 overlapping runs, never reassigned, symlinks followed, leftover temporary files removed), typed placeholders kept, a stopped run's lock taken over and a live one waited for, restore, `--summary`, `--`, exit codes, `\| head`, and errors that show no input, map value or argument | `test/cli.test.ts` (runs the built `dist/cli.js`); `test/scrub.test.ts`: "continuing from an earlier map" |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
-| Scan time stays linear: twenty crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; under 40 ms and 140–200 ms on an M-series laptop) |
+| Scan time stays linear: twenty-six crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; under 40 ms and 140–200 ms on an M-series laptop) |
 | A 12 MB key block with no END line is masked rather than throwing | `test/performance.test.ts`: "very large input" |
 
 Every key in the tests is fake and is assembled at runtime, so the repository never holds a complete key-shaped string.

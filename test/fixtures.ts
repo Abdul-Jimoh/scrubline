@@ -22,9 +22,11 @@ export const FAKE = {
   TELEGRAM_BOT_TOKEN: j('123456789', ':', 'AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1'),
   URL_PASSWORD: j('S3cr3t', '-Pa55-', 'w0rd'),
   EMAIL: j('jane.doe', '@', 'example.com'),
+  HOME_USER: 'jane',
 } as const;
 
 /** Text a sample needs around it to be detected, for kinds that mask only part of what they match. */
 export const AROUND: Partial<Record<keyof typeof FAKE, readonly [string, string]>> = {
   URL_PASSWORD: ['postgres://app:', '@db.internal:5432/prod'],
+  HOME_USER: ['(/Users/', '/projects/app/index.js:3:9)'],
 };

@@ -357,6 +357,174 @@ describe('known limit: keys joined by a character of their own alphabet', () => 
   });
 });
 
+describe('home-directory paths (issue #5)', () => {
+  const mask = (s: string) => scrub(s).text;
+
+  it('masks the name in /Users, /home and Windows paths on any drive, JSON-escaped too; the rest of the path is kept', () => {
+    expect(mask('at Object.<anonymous> (/Users/jane/projects/app/index.js:3:9)')).toBe(
+      'at Object.<anonymous> (/Users/[HOME_USER_1]/projects/app/index.js:3:9)',
+    );
+    expect(mask('open /home/jane/.bashrc')).toBe('open /home/[HOME_USER_1]/.bashrc');
+    expect(mask(String.raw`at C:\Users\jane\app\index.js:3:9`)).toBe(String.raw`at C:\Users\[HOME_USER_1]\app\index.js:3:9`);
+    expect(mask(String.raw`D:\Users\jane\x`)).toBe(String.raw`D:\Users\[HOME_USER_1]\x`);
+    expect(mask(String.raw`{"path":"C:\\Users\\jane\\app\\index.js"}`)).toBe(
+      String.raw`{"path":"C:\\Users\\[HOME_USER_1]\\app\\index.js"}`,
+    );
+    expect(mask('C:/Users/jane/app')).toBe('C:/Users/[HOME_USER_1]/app');
+    expect(mask(String.raw`c:\users\jane\x`)).toBe(String.raw`c:\users\[HOME_USER_1]\x`);
+  });
+
+  it('masks a Windows path in JSON inside JSON (found by the test generator)', () => {
+    const doc = JSON.stringify({ msg: JSON.stringify({ path: String.raw`C:\Users\jane\x` }) });
+    const out = scrub(doc).text;
+    expect(JSON.parse(JSON.parse(out).msg)).toEqual({ path: String.raw`C:\Users\[HOME_USER_1]\x` });
+  });
+
+  it('masks the name when a key glued on by - or _ ran on into the drive letter (found by the test generator)', () => {
+    expect(mask(String.raw`${FAKE.JWT}-C:\Users\jane\x`)).toBe(String.raw`[JWT_1]:\Users\[HOME_USER_1]\x`);
+    expect(mask(`${FAKE.ANTHROPIC_KEY}_C:/Users/jane`)).toBe('[ANTHROPIC_KEY_1]:/Users/[HOME_USER_1]');
+    // The same with `file://`: the key takes `file`.
+    expect(mask(`${FAKE.OPENAI_KEY}_file:///Users/jane `)).toBe('[OPENAI_KEY_1]:///Users/[HOME_USER_1] ');
+  });
+
+  it('a name that runs on into the drive letter of a Windows home path ends before it (found by the test generator)', () => {
+    expect(mask(String.raw`/Users/jane%3D%20d:\users\bob x`)).toBe(String.raw`/Users/[HOME_USER_1]d:\users\[HOME_USER_2] x`);
+    expect(mask(String.raw`/home/d:\Users\bob`)).toBe(String.raw`/home/d:\Users\[HOME_USER_1]`);
+    // Glued to a letter, the drive letter is part of the name, and what follows is not a home path (`xC:\Users\…`).
+    expect(mask(String.raw`/home/janed:\Users\bob`)).toBe(String.raw`/home/[HOME_USER_1]:\Users\bob`);
+  });
+
+  it('a Windows name after a single backslash keeps the backslash outside the mask', () => {
+    const { findings } = scrub(String.raw`C:\Users\nancy\x`);
+    expect(findings).toEqual([{ kind: 'HOME_USER', placeholder: '[HOME_USER_1]', start: 9, end: 14 }]);
+  });
+
+  it('masks the name at the end of a path: before a space, a quote, a colon or the end of the text', () => {
+    expect(mask('cd /home/jane now')).toBe('cd /home/[HOME_USER_1] now');
+    expect(mask('HOME="/home/jane"')).toBe('HOME="/home/[HOME_USER_1]"');
+    expect(mask("HOME='/home/jane'")).toBe("HOME='/home/[HOME_USER_1]'");
+    expect(mask('PATH=/home/jane:/usr/bin')).toBe('PATH=/home/[HOME_USER_1]:/usr/bin');
+    expect(mask('cd /home/jane')).toBe('cd /home/[HOME_USER_1]');
+    expect(mask(String.raw`C:\Users\jane`)).toBe(String.raw`C:\Users\[HOME_USER_1]`);
+    expect(mask('/Users/jane\n')).toBe('/Users/[HOME_USER_1]\n');
+  });
+
+  it('a dot that ends a sentence is not part of the name; dots inside it are', () => {
+    expect(scrub('files are in /home/jane.doe.').map).toEqual({ '[HOME_USER_1]': 'jane.doe' });
+  });
+
+  it('keeps shared folders and a home root with no name', () => {
+    for (const kept of [
+      '/Users/Shared/file',
+      '/Users/Shared',
+      String.raw`C:\Users\Public\Desktop`,
+      String.raw`C:\Users\Default\NTUSER.DAT`,
+      String.raw`C:\Users\All Users\x`,
+      String.raw`C:\\Users\\public\\x`,
+      'ls /home/',
+      'ls /home/ now',
+      '/home//x',
+      '/home',
+    ])
+      expect(scrub(kept).findings, kept).toEqual([]);
+    // Only the whole folder name is shared.
+    expect(mask('/Users/Sharedjane/x')).toBe('/Users/[HOME_USER_1]/x');
+    expect(mask('/home/all users')).toBe('/home/all users');
+    expect(mask('/home/all usersx')).toBe('/home/[HOME_USER_1] usersx');
+  });
+
+  it('only at a path boundary', () => {
+    for (const kept of ['/opt/home/x', 'foo/Users/x', './home/x', 'xC:\\Users\\jane', 'https://example.com/home/jane'])
+      expect(scrub(kept).findings, kept).toEqual([]);
+    expect(mask('file:///Users/jane/a.js')).toBe('file:///Users/[HOME_USER_1]/a.js');
+    expect(mask('file:///C:/Users/jane/a.js')).toBe('file:///C:/Users/[HOME_USER_1]/a.js');
+    // After an escape in JSON, or after punctuation.
+    expect(mask(String.raw`"a\n/home/jane\t/Users/jane"`)).toBe(String.raw`"a\n/home/[HOME_USER_1]\t/Users/[HOME_USER_1]"`);
+    expect(mask('(/home/jane) [/Users/jane] -/home/jane _/home/jane')).toBe(
+      '(/home/[HOME_USER_1]) [/Users/[HOME_USER_1]] -/home/[HOME_USER_1] _/home/[HOME_USER_1]',
+    );
+  });
+
+  it('the same name gets the same placeholder across paths, and restore round-trips', () => {
+    const input = String.raw`/Users/jane/a /home/jane/b C:\Users\jane\c "C:\\Users\\jane\\d" /home/bob/e`;
+    const { text, map } = scrub(input);
+    expect(text).toBe(
+      String.raw`/Users/[HOME_USER_1]/a /home/[HOME_USER_1]/b C:\Users\[HOME_USER_1]\c "C:\\Users\\[HOME_USER_1]\\d" /home/[HOME_USER_2]/e`,
+    );
+    expect(map).toEqual({ '[HOME_USER_1]': 'jane', '[HOME_USER_2]': 'bob' });
+    expect(restore(text, map)).toBe(input);
+  });
+
+  it('a JSON document with home paths stays valid JSON', () => {
+    const doc = JSON.stringify({ a: String.raw`C:\Users\nancy\x`, b: '/home/jos\u00e9/x', c: '/home/rita\n' });
+    const out = scrub(doc).text;
+    expect(JSON.parse(out)).toEqual({ a: String.raw`C:\Users\[HOME_USER_1]\x`, b: '/home/[HOME_USER_2]/x', c: '/home/[HOME_USER_3]\n' });
+    // A non-ASCII letter written as \uXXXX is part of the name.
+    const escaped = String.raw`"/home/jos\u00e9/x"`;
+    expect(scrub(escaped).map).toEqual({ '[HOME_USER_1]': String.raw`jos\u00e9` });
+  });
+
+  it('an ASCII letter written as \\uXXXX is part of the name too, so JSON stays valid (found by Qodo in the review of PR #18)', () => {
+    for (const [doc, name] of <[string, string][]>[
+      [String.raw`"/home/\u006aane/x"`, String.raw`\u006aane`],
+      [String.raw`"/home/ja\u006Ee/x"`, String.raw`ja\u006Ee`],
+      [String.raw`"C:\\Users\\\u006aane\\x"`, String.raw`\u006aane`],
+    ]) {
+      const { text, map } = scrub(doc);
+      expect(Object.values(map), doc).toEqual([name]);
+      expect(JSON.parse(text), doc).toMatch(/[/\\]\[HOME_USER_1\][/\\]x$/);
+    }
+    // An escaped separator or quote still ends the name.
+    expect(scrub(String.raw`"/home/jane\u002fx"`).map).toEqual({ '[HOME_USER_1]': 'jane' });
+    expect(scrub(String.raw`"/home/jane\u0022x"`).map).toEqual({ '[HOME_USER_1]': 'jane' });
+  });
+
+  it('a Windows home root in any case, and FILE:// in any case (found by Qodo in the review of PR #18)', () => {
+    for (const root of ['uSeRs', 'USers', 'usERS'])
+      expect(mask(`C:\\${root}\\jane\\x`), root).toBe(`C:\\${root}\\[HOME_USER_1]\\x`);
+    expect(mask(String.raw`/home/d:\uSeRs\bob`)).toBe(String.raw`/home/d:\uSeRs\[HOME_USER_1]`);
+    expect(mask('FILE:///Users/alice/x')).toBe('FILE:///Users/[HOME_USER_1]/x');
+    expect(mask('File:///home/alice/x')).toBe('File:///home/[HOME_USER_1]/x');
+  });
+
+  it('a name that is also an address is masked as the user name; a key in the name keeps its type', () => {
+    expect(mask(`/home/${FAKE.EMAIL}/x`)).toBe('/home/[HOME_USER_1]/x');
+    expect(mask(`/home/${FAKE.AWS_KEY}/x`)).toBe('/home/[AWS_KEY_1]/x');
+  });
+
+  it('scrubbing the output again finds nothing new', () => {
+    const once = mask(String.raw`/Users/jane/a C:\Users\jane\b C:\\Users\\bob\\c /home/x-${FAKE.GITHUB_TOKEN}`);
+    expect(scrub(once).findings).toEqual([]);
+  });
+
+  describe('known limits', () => {
+    it('a Windows name with a space, apostrophe or parenthesis is masked only up to it', () => {
+      expect(mask(String.raw`C:\Users\Jane Doe\x`)).toBe(String.raw`C:\Users\[HOME_USER_1] Doe\x`);
+      expect(mask(String.raw`C:\Users\O'Brien\x`)).toBe(String.raw`C:\Users\[HOME_USER_1]'Brien\x`);
+      expect(mask(String.raw`C:\Users\jane(2)\x`)).toBe(String.raw`C:\Users\[HOME_USER_1](2)\x`);
+    });
+
+    it('relative paths, mixed Windows separators, slash-escaped JSON and other home roots are not detected', () => {
+      for (const kept of [
+        '../home/jane/x',
+        'x//home/jane',
+        String.raw`C:/Users\jane\x`,
+        '/users/jane/x',
+        String.raw`"\/home\/jane"`,
+        '~/x',
+        '/root/x',
+        String.raw`C:\Documents and Settings\jane`,
+      ])
+        expect(scrub(kept).findings, kept).toEqual([]);
+    });
+
+    it('a person whose user name is a shared folder name is not masked, and a final dot stays visible', () => {
+      expect(mask('/home/public/x')).toBe('/home/public/x');
+      expect(scrub('/home/jane./x').map).toEqual({ '[HOME_USER_1]': 'jane' });
+    });
+  });
+});
+
 describe('numbering', () => {
   const other = j('ops', '@', 'example.com');
 
