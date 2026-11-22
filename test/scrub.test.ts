@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DETECTORS, restore, scrub } from '../src/index.js';
-import { FAKE, j } from './fixtures.js';
+import { AROUND, FAKE, j } from './fixtures.js';
 
 describe('every built-in detector masks its format with a typed placeholder', () => {
   it('has a fake sample for every detector', () => {
@@ -9,10 +9,12 @@ describe('every built-in detector masks its format with a typed placeholder', ()
 
   for (const [kind, value] of Object.entries(FAKE)) {
     it(kind, () => {
-      const { text, map, findings } = scrub(`before ${value} after`);
-      expect(text).toBe(`before [${kind}_1] after`);
+      const [pre, post] = AROUND[kind as keyof typeof FAKE] ?? ['', ''];
+      const { text, map, findings } = scrub(`before ${pre}${value}${post} after`);
+      expect(text).toBe(`before ${pre}[${kind}_1]${post} after`);
       expect(map).toEqual({ [`[${kind}_1]`]: value });
-      expect(findings).toEqual([{ kind, placeholder: `[${kind}_1]`, start: 7, end: 7 + value.length }]);
+      const start = 7 + pre.length;
+      expect(findings).toEqual([{ kind, placeholder: `[${kind}_1]`, start, end: start + value.length }]);
     });
   }
 });
@@ -124,6 +126,103 @@ describe('token boundaries', () => {
   it('does not mask a key prefix inside a longer word', () => {
     for (const line of ['risk-assessment-for-the-quarter-2026', 'fork_test_handlesEverythingNicely', 'EURASIAN1234567890ABCDEFGH'])
       expect(scrub(line).text).toBe(line);
+  });
+});
+
+describe('passwords in URLs (issue #3)', () => {
+  const pw = FAKE.URL_PASSWORD;
+
+  it('masks only the password, for any scheme', () => {
+    for (const scheme of ['postgres', 'postgresql', 'mysql', 'mongodb+srv', 'redis', 'amqp', 'https', 'git+ssh']) {
+      const url = `${scheme}://app:${pw}@db.internal:5432/prod?sslmode=require`;
+      expect(scrub(`DATABASE_URL=${url}`).text).toBe(`DATABASE_URL=${scheme}://app:[URL_PASSWORD_1]@db.internal:5432/prod?sslmode=require`);
+    }
+  });
+
+  it('gives the same password the same placeholder in two URLs, and restores exactly', () => {
+    const input = `primary postgres://app:${pw}@a.internal/db replica postgres://ro:${pw}@b.internal/db`;
+    const { text, map } = scrub(input);
+    expect(text).toBe('primary postgres://app:[URL_PASSWORD_1]@a.internal/db replica postgres://ro:[URL_PASSWORD_1]@b.internal/db');
+    expect(restore(text, map)).toBe(input);
+  });
+
+  it('masks a URL-encoded password whole, and one with a raw @ or : up to the last @', () => {
+    expect(scrub('mysql://root:p%40ss%3Aw0rd@localhost/app').text).toBe('mysql://root:[URL_PASSWORD_1]@localhost/app');
+    const { text, map } = scrub('redis://u:p@ss:w0rd@cache:6379');
+    expect(text).toBe('redis://u:[URL_PASSWORD_1]@cache:6379');
+    expect(map['[URL_PASSWORD_1]']).toBe('p@ss:w0rd');
+  });
+
+  it('masks a password with no user name, and not an empty one', () => {
+    expect(scrub(`redis://:${pw}@cache:6379`).text).toBe('redis://:[URL_PASSWORD_1]@cache:6379');
+    expect(scrub('redis://:@cache:6379').findings).toEqual([]);
+  });
+
+  it('does not mask a URL with no password, or a :…@ after the authority', () => {
+    for (const line of [
+      'postgres://app@db.internal/prod',
+      'https://db.internal:5432/x',
+      'https://example.com/a:b@c',
+      'https://example.com/?q=a:b@c',
+      'https://example.com?q=a:b@c',
+      'https://example.com#a:b@c',
+      'see ://a:b@c and a:b@c',
+    ])
+      // (`app@db.internal` is still masked as an address by the email detector.)
+      expect(scrub(line).findings.filter((f) => f.kind === 'URL_PASSWORD')).toEqual([]);
+  });
+
+  it('masks a password in JSON, including JSON that escapes slashes or quotes, and the JSON stays valid', () => {
+    const json = JSON.stringify({ url: `postgres://app:${pw}@db/x`, quoted: 'postgres://app:pa"ss@db/x', next: 'kept' });
+    expect(JSON.parse(scrub(json).text)).toEqual({
+      url: 'postgres://app:[URL_PASSWORD_1]@db/x',
+      quoted: 'postgres://app:[URL_PASSWORD_2]@db/x',
+      next: 'kept',
+    });
+    const php = json.replaceAll('/', '\\/');
+    expect(JSON.parse(scrub(php).text).url).toBe('postgres://app:[URL_PASSWORD_1]@db/x');
+  });
+
+  it('a key used as the password keeps its own type', () => {
+    expect(scrub(`https://x-access-token:${FAKE.GITHUB_TOKEN}@github.com/org/repo.git`).text).toBe(
+      'https://x-access-token:[GITHUB_TOKEN_1]@github.com/org/repo.git',
+    );
+  });
+
+  it('masks the password when a key glued to the scheme claims the scheme too (found by the test generator)', () => {
+    expect(scrub(`${FAKE.OPENAI_KEY}-postgres://:${pw}@db`).text).toBe('[OPENAI_KEY_1]://:[URL_PASSWORD_1]@db');
+  });
+
+  it('a user name that is an address is masked as an email, and the password separately', () => {
+    expect(scrub(`smtp://${FAKE.EMAIL}:${pw}@mail.example.com:587`).text).toBe('smtp://[EMAIL_1]:[URL_PASSWORD_1]@mail.example.com:587');
+  });
+
+  it('scrubbing the output again finds nothing new', () => {
+    const input = `postgres://app:${pw}@db/x https://u:x${FAKE.GITHUB_TOKEN}@h postgres://u:p@h,${FAKE.EMAIL}`;
+    expect(scrub(scrub(input).text).findings).toEqual([]);
+  });
+
+  // Known limits (README): the trade-offs named in findUrlPasswords, pinned here.
+  it('known limit: a password holding a raw space, quote or placeholder is not masked', () => {
+    for (const line of [
+      'postgres://app:pa ss@db/x',
+      'postgres://app:pa"ss@db/x',
+      'postgres://app:pa<ss@db/x',
+      'postgres://app:pa|ss@db/x',
+      'postgres://app:pa\\qss@db/x',
+      'postgres://app:pa[EMAIL_1]ss@db/x',
+    ])
+      expect(scrub(line).findings).toEqual([]);
+  });
+
+  it('known limit: user:password@host with no scheme is not detected', () => {
+    expect(scrub(`curl -u app:${pw}@db`).findings).toEqual([]);
+  });
+
+  it('known limit: text glued to the host by , = or ; and holding a later @ is masked with the password', () => {
+    const { text, map } = scrub(`postgres://app:${pw}@db,${FAKE.EMAIL}`);
+    expect(text).toBe('postgres://app:[URL_PASSWORD_1]@example.com');
+    expect(map['[URL_PASSWORD_1]']).toBe(`${pw}@db,jane.doe`);
   });
 });
 

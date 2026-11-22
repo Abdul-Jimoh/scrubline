@@ -30,8 +30,8 @@ const armour = fc
   )
   .map((lines) => lines.map((l) => `${l}\n`).join(''));
 
-/** One generator per built-in format. */
-const planted = fc.oneof(
+/** One generator per built-in format whose whole match is the secret. */
+const whole = fc.oneof(
   cat(fc.constantFrom('AKIA', 'ASIA'), chars(UP + DIG, 16)),
   token('ghp_', ALNUM, 36),
   token('github_pat_', ALNUM + '_', 60, 82),
@@ -63,6 +63,27 @@ const planted = fc.oneof(
   ),
 );
 
+/**
+ * A URL with a password, which is the only part masked. The password holds what URL parsers accept raw in a userinfo,
+ * `@` and `:` included; the user name may be empty.
+ */
+const urlWithPassword = fc
+  .tuple(
+    fc.constantFrom('postgres', 'postgresql', 'mongodb+srv', 'redis', 'amqp', 'https'),
+    chars(LOW + DIG, 0, 8),
+    chars(ALNUM + "!$&'()*+,;=~._-%@:", 12, 24),
+    chars(LOW, 2, 10),
+    fc.constantFrom('', '.internal', '.example.com'),
+    fc.constantFrom('', ':5432', '/db', ':6379/0?ssl=true'),
+  )
+  .map(([scheme, user, pw, host, domain, rest]) => [`${scheme}://${user}:${pw}@${host}${domain}${rest}`, pw] as const);
+
+/** `[text, secret]`: what is planted in the document, and the part of it that must not survive. */
+const planted = fc.oneof(
+  { arbitrary: whole.map((s) => [s, s] as const), weight: 17 },
+  { arbitrary: urlWithPassword, weight: 2 },
+);
+
 /** Text that must survive: words, punctuation, and placeholder-shaped literals that could collide with real masks. */
 const filler = fc.oneof(
   chars(ALNUM + ' .,:;!?()_-/#=+"\'', 0, 30),
@@ -84,8 +105,8 @@ const separator = fc.constantFrom(
 const document = fc
   .array(fc.tuple(fc.oneof(planted.map((s) => ({ s })), filler.map((f) => ({ f }))), separator), { maxLength: 25 })
   .map((parts) => ({
-    text: parts.map(([p, sep]) => ('s' in p ? p.s : p.f) + sep).join(''),
-    secrets: parts.flatMap(([p]) => ('s' in p ? [p.s] : [])),
+    text: parts.map(([p, sep]) => ('s' in p ? p.s[0] : p.f) + sep).join(''),
+    secrets: parts.flatMap(([p]) => ('s' in p ? [p.s[1]] : [])),
   }));
 
 const runs = { numRuns: 500 };

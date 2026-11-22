@@ -20,5 +20,11 @@ export const FAKE = {
   SENDGRID_KEY: j('SG.', 'ngeVfQFYQlKU0ufo8x5d1A', '.', 'TwL2iGABf9DHoTf-09kqeF8tAmbihYzrnopKc-1s5cr'),
   DIGITALOCEAN_TOKEN: j('dop_', 'v1_', '0123456789abcdef'.repeat(4)),
   TELEGRAM_BOT_TOKEN: j('123456789', ':', 'AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1'),
+  URL_PASSWORD: j('S3cr3t', '-Pa55-', 'w0rd'),
   EMAIL: j('jane.doe', '@', 'example.com'),
 } as const;
+
+/** Text a sample needs around it to be detected, for kinds that mask only part of what they match. */
+export const AROUND: Partial<Record<keyof typeof FAKE, readonly [string, string]>> = {
+  URL_PASSWORD: ['postgres://app:', '@db.internal:5432/prod'],
+};

@@ -178,6 +178,62 @@ function* findEmails(input: string): Iterable<readonly [number, number]> {
   }
 }
 
+/** `://`, or `:\/\/` as JSON that escapes slashes (PHP) writes it. */
+const URL_SEPARATOR = /:(?:\/\/|\\\/\\\/)/g;
+/**
+ * A character a URL scheme can end with (`postgres`, `mongodb+srv`, `git+ssh`), or `\0`: a key glued to the scheme
+ * by `-` (`sk-proj-…-postgres://`) claims the scheme too, and the password after it must still be masked.
+ */
+const SCHEME_CHAR = /[A-Za-z0-9+.\0-]/;
+const PLACEHOLDER_AT = /\[[A-Z][A-Z0-9_]*_\d+\]/y;
+/**
+ * Characters that end a URL's authority (`user:password@host:port`): the start of the path, query or fragment, and
+ * characters that end a URL in running text or a JSON string. Trade-off: a password that holds one of these raw
+ * (whitespace, `"`, `<`, `>`, `` ` ``, `{`, `}`, `|`) is not masked, because the scan stops before its `@`. URL
+ * parsers require them to be percent-encoded, which is masked.
+ */
+const AUTHORITY_END = new Uint8Array(128);
+for (let c = 0; c <= 32; c++) AUTHORITY_END[c] = 1; // whitespace and control characters, including `\0` (claimed)
+for (const c of '/?#"<>`{}|\x7f') AUTHORITY_END[c.charCodeAt(0)] = 1;
+
+/**
+ * Passwords in URLs: `scheme://user:password@host`. Only the password is masked. The userinfo ends at the last `@`
+ * before the authority ends, as URL parsers read it, so a raw `@` in a password (`p@ss`) stays inside the mask.
+ * Trade-off: text glued to the URL by punctuation a userinfo may hold (`=`, `,`, `;`) and containing a later `@`
+ * (`…@host,a@b.co`) is masked as part of the password, host included (over-masking, not a leak).
+ *
+ * The scan stops at a placeholder (`[GITHUB_TOKEN_1]`) or claimed text, so a key used as the password keeps its own
+ * type and scrubbing the output again finds nothing new. Trade-off: a password that holds a placeholder-shaped
+ * `[KIND_N]` is not masked. Each scan stops at the `/` of the next `://`, so the search stays linear.
+ */
+function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
+  for (const m of input.matchAll(URL_SEPARATOR)) {
+    if (m.index === 0 || !SCHEME_CHAR.test(input[m.index - 1]!)) continue;
+    let colon = -1;
+    let at = -1;
+    for (let k = m.index + m[0].length; k < input.length; k++) {
+      const c = input.charCodeAt(k);
+      if (c < 128 && AUTHORITY_END[c]) break;
+      if (c === 92 /* \ */) {
+        // `\"` and `\\` are a quote and a backslash in a JSON string; any other escape (`\n`, `\/`) ends the URL.
+        if (input[k + 1] === '"' || input[k + 1] === '\\') {
+          k++;
+          continue;
+        }
+        break;
+      }
+      if (c === 91 /* [ */) {
+        PLACEHOLDER_AT.lastIndex = k;
+        if (PLACEHOLDER_AT.test(input)) break;
+      }
+      if (c === 64 /* @ */) at = k;
+      else if (c === 58 /* : */ && colon === -1) colon = k;
+    }
+    // An empty password (`redis://:@host`) has nothing to mask.
+    if (colon !== -1 && at > colon + 1) yield [colon + 1, at];
+  }
+}
+
 export const DETECTORS: readonly Detector[] = [
   { kind: 'PRIVATE_KEY', find: findKeyBlocks },
   { kind: 'JWT', find: findJwts },
@@ -201,5 +257,8 @@ export const DETECTORS: readonly Detector[] = [
     'TELEGRAM_BOT_TOKEN',
     new RegExp(`(?<![${ALNUM}]${ENDS_ESCAPE}(?<!/bot))[0-9]{8,10}:[${B64URL}]{35}${end(ALNUM)}`, 'g'),
   ),
+  // After the key formats, so a key used as a URL password keeps its own type; before EMAIL, so `user:pw@host.com`
+  // is not read as the address `pw@host.com`.
+  { kind: 'URL_PASSWORD', find: findUrlPasswords },
   { kind: 'EMAIL', find: findEmails },
 ];

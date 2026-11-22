@@ -59,6 +59,7 @@ console.log(restore(answer, map)); // placeholders in the model's answer become 
 | `AWS_KEY` | access key IDs (`AKIA…`, `ASIA…`) |
 | `GOOGLE_API_KEY`, `SLACK_TOKEN`, `STRIPE_KEY` | `AIza…`, `xox[abprs]-…`, `sk_live_`/`rk_live_`/`whsec_` |
 | `NPM_TOKEN`, `HUGGINGFACE_TOKEN`, `SENDGRID_KEY`, `DIGITALOCEAN_TOKEN`, `TELEGRAM_BOT_TOKEN` | their published formats |
+| `URL_PASSWORD` | the password in a URL or connection string (`postgres://app:[URL_PASSWORD_1]@db:5432/prod`); scheme, user, host and path stay readable |
 | `EMAIL` | email addresses (an SSH remote like `git@github.com:…` is kept) |
 
 Keys are found at token boundaries: after whitespace, punctuation, `_` or quotes; after an escape (`\n`, `\t`,
@@ -67,8 +68,9 @@ A complete private key block (BEGIN to END) is masked whatever its armour lines 
 stays valid JSON: no mask starts inside an escape, and a mask that would start right after an escaping backslash
 (`\n` + `pm_…`) takes the backslash with it. One exception is under Known limits.
 
-Planned, not built yet: labelled secrets (`password=…`), connection strings, phone and card numbers, IP addresses,
-home paths, high-entropy strings, custom rules, streaming and the CLI. They will be opened as issues in the backlog.
+Planned, not built yet, each an issue in the [backlog](https://github.com/Abdul-Jimoh/scrubline/issues): labelled
+secrets (`password=…`), phone and card numbers, IP addresses, home paths, high-entropy strings, custom rules,
+streaming and the CLI.
 
 ## Known limits
 
@@ -85,6 +87,13 @@ home paths, high-entropy strings, custom rules, streaming and the CLI. They will
 - URL-encoded addresses with no literal `@` (`?email=jane%40example.com`) are not detected.
 - In plain text, a mask right after a lone backslash (`DOMAIN\jane@…`) includes the backslash, so that value gets
   its own placeholder, separate from the same address elsewhere, and `restore` puts the backslash back with it.
+- A URL password holding a raw space, `"`, `<`, `>`, `` ` ``, `{`, `}`, `|`, a backslash (other than `\"` and `\\` in
+  JSON) or a placeholder-shaped `[KIND_N]` is not masked. URL parsers require those characters to be
+  percent-encoded (`%20`, `%22`), and an encoded password is masked.
+- A URL's password runs to the last `@` before the host ends, as URL parsers read it. Text glued to the host by
+  `,`, `;` or `=` with no space, and holding a later `@` (`…@db,jane@example.com`), is masked with the password,
+  host included (over-masking, not a leak).
+- `user:password@host` with no `scheme://` in front (`curl -u`, some config formats) is not detected.
 - A private key block is masked from BEGIN to the next END line within 64 KB, even when the BEGIN belonged to a
   truncated paste and the END to a later block: everything in between is masked too (over-masking, not a leak).
 - With no END line within 64 KB, a block is masked up to the first character a key block cannot hold, such as the
@@ -101,9 +110,10 @@ home paths, high-entropy strings, custom rules, streaming and the CLI. They will
 | Each format above is masked with its typed placeholder | `test/scrub.test.ts`: "every built-in detector" |
 | The boundary cases above, JSON validity, and complete PGP/PEM blocks with armour lines (also in PHP-style `\/` JSON) | `test/scrub.test.ts`: "token boundaries", "private key blocks" |
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
-| In generated documents (fake keys of every format, armoured key blocks, emails, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid | `test/properties.test.ts` |
+| In generated documents (fake keys of every format, armoured key blocks, emails, URLs with passwords, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid | `test/properties.test.ts` |
+| URL passwords: any scheme, only the password masked, encoded and `@`-holding passwords, no-password and path/query look-alikes kept, JSON (also slash-escaped) stays valid, a key as the password keeps its type, and the limits above | `test/scrub.test.ts`: "passwords in URLs" |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
-| Scan time stays linear: twelve crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; about 5 ms and 140–200 ms on an M-series laptop) |
+| Scan time stays linear: sixteen crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; 5–20 ms and 140–200 ms on an M-series laptop) |
 | A 12 MB key block with no END line is masked rather than throwing | `test/performance.test.ts`: "very large input" |
 
 Every key in the tests is fake and is assembled at runtime, so the repository never holds a complete key-shaped string.
