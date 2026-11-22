@@ -110,9 +110,10 @@ run_agent() {
 # The tool list keeps the agent to editing, the project's checks and local git; it cannot run node, push, or touch
 # issues and PRs. `npm run check`, `npm test` and vitest run code the agent can edit, so this limits mistakes, not a
 # determined agent: the ticket text must be the owner's, and the runner posts nothing the agent wrote without
-# scrubbing it with a scrubber the agent cannot change. Any `git commit` form is allowed: in the first live run the
-# agent used `-q -m`, `-F <file>` and a heredoc, an allow rule for `git commit -m *` alone denied them all, and its
-# finished work was never committed. Amending and skipping the commit hooks stay denied.
+# scrubbing it with a scrubber the agent cannot change. The agent does not commit: it stages its work and writes the
+# message to commit-msg.txt, and the runner commits (`commit_staged`). In the first live run the agent's commits were
+# denied by a too-narrow allow rule; allowing every `git commit` form instead would let flags such as `-n` skip the
+# repository's commit hooks, which no deny pattern reliably blocks.
 agent() {
   local prompt="$1" out="$2"
   [ -n "$prompt" ] || needs_help "empty prompt"
@@ -124,9 +125,8 @@ agent() {
       --allowedTools 'Read' 'Edit' 'Write' 'Grep' 'Glob' \
         'Bash(npm run check)' 'Bash(npm run typecheck)' 'Bash(npm test*)' 'Bash(npx vitest *)' 'Bash(npx tsc *)' \
         'Bash(git status*)' 'Bash(git diff*)' 'Bash(git log*)' 'Bash(git show*)' 'Bash(git add *)' \
-        'Bash(git commit *)' 'Bash(gh issue view *)' 'Bash(ls *)' \
-      --disallowedTools 'Bash(git push*)' 'Bash(git commit --amend*)' 'Bash(git commit * --amend*)' \
-        'Bash(git commit *--no-verify*)' 'Bash(git commit -n *)' 'Bash(git commit * -n *)' 'Bash(git reset*)' 'Bash(git rebase*)' \
+        'Bash(gh issue view *)' 'Bash(ls *)' \
+      --disallowedTools 'Bash(git push*)' 'Bash(git commit*)' 'Bash(git reset*)' 'Bash(git rebase*)' \
         'Bash(git checkout*)' 'Bash(gh pr *)' 'Bash(gh issue comment*)' 'Bash(gh issue edit*)' 'Bash(node *)' \
         'WebFetch' 'WebSearch' \
       --output-format json >"$out" 2>"$out.err")
@@ -138,23 +138,29 @@ agent() {
   [ "$rc" = 0 ] || needs_help "the agent session ended with exit $rc$([ "$rc" = 142 ] && echo " (timed out)")"
 }
 
-# True when `npm run check` passes and the branch has committed work and a clean tree.
+# Commits what the agent staged, and only that, through the repository's commit hooks, with the agent's
+# commit-msg.txt (or a default naming the ticket). A file the agent left unstaged is not swept in: it fails the
+# clean-tree check below.
+commit_staged() {
+  git -C "$WT" diff --cached --quiet && return 0
+  local msg="$RUN_DIR/commit-msg.txt"
+  [ -s "$msg" ] || printf '%s (#%s)\n\nCommitted by the scheduled agent runner.\n' "$TITLE" "$ISSUE" >"$msg"
+  if git -C "$WT" commit -q -F "$msg"; then
+    rm -f "$msg"
+    log "committed the agent's staged work"
+  else
+    log "the runner could not commit the staged work"
+    return 1
+  fi
+}
+
+# True when the staged work is committed, `npm run check` passes on that commit, the tree is clean, and the branch has
+# committed work. The check runs after the commit, so a commit hook that changes content cannot slip past it.
 checks_pass() {
   local logf="$RUN_DIR/check-$1.log"
+  commit_staged || { echo "the staged work could not be committed (a commit hook refused it?)" >"$logf"; return 1; }
   (cd "$WT" && npm run check) >"$logf" 2>&1 || { log "check $1: npm run check failed"; tail -60 "$logf" >"$logf.tail"; mv "$logf.tail" "$logf"; return 1; }
-  # Work that passes the checks but was left uncommitted is committed by the runner (the repository's commit hooks
-  # still run), with the agent's commit-msg.txt when it wrote one.
-  if [ -n "$(git -C "$WT" status --porcelain)" ]; then
-    local msg="$RUN_DIR/commit-msg.txt"
-    [ -s "$msg" ] || printf '%s (#%s)\n\nCommitted by the scheduled agent runner after npm run check passed.\n' "$TITLE" "$ISSUE" >"$msg"
-    if git -C "$WT" add -A && git -C "$WT" commit -q -F "$msg"; then
-      rm -f "$msg"
-      log "check $1: committed the agent's uncommitted work"
-    else
-      log "check $1: uncommitted changes, and the runner could not commit them"
-      echo "uncommitted changes:" >>"$logf"; git -C "$WT" status --short >>"$logf"; return 1
-    fi
-  fi
+  [ -z "$(git -C "$WT" status --porcelain)" ] || { log "check $1: changes left unstaged or uncommitted"; echo "changes not staged for the commit (stage them with git add, or delete them):" >>"$logf"; git -C "$WT" status --short >>"$logf"; return 1; }
   [ -n "$(git -C "$WT" log --oneline origin/main..HEAD)" ] || { log "check $1: nothing committed"; echo "no commits on the branch" >>"$logf"; return 1; }
   log "check $1: pass"
 }
