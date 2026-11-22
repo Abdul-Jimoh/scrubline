@@ -115,7 +115,10 @@ agent() {
         'Bash(git checkout*)' 'Bash(gh pr *)' 'Bash(gh issue comment*)' 'Bash(gh issue edit*)' 'Bash(node *)' \
         'WebFetch' 'WebSearch' \
       --output-format json >"$out" 2>"$out.err")
-  log "agent exit $? ($(jq -r '"\(.num_turns) turns, \((.duration_ms // 0) / 1000 | floor) s"' "$out" 2>/dev/null || echo "no result"))"
+  local rc=$? summary=""
+  [ -s "$out" ] && summary=$(jq -r '"\(.num_turns) turns, \((.duration_ms // 0) / 1000 | floor) s"' "$out" 2>/dev/null)
+  # 142 is SIGALRM: the session ran past AGENT_TIMEOUT.
+  log "agent exit $rc (${summary:-no result}$([ "$rc" = 142 ] && echo ", timed out after $AGENT_TIMEOUT s"))"
 }
 
 # True when `npm run check` passes and the branch has committed work and a clean tree.
