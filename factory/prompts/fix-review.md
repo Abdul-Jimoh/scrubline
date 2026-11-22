@@ -9,7 +9,7 @@ For each open finding:
 2. If it is real, fix it. The test must fail before the fix and pass after it. Follow `AGENTS.md`.
 3. If it is wrong or out of scope, do not change the code for it.
 
-Run `npm run check` until it passes. Stage your change with `git add <files>`, leave nothing else in the tree, and
+Run `npm run check` until it passes. Stage your change with `git add <files>`, keep scratch files in `{{RUN_DIR}}`, and
 write the commit message to `{{RUN_DIR}}/commit-msg.txt`. Do not commit, push, comment, or change any finding's
 status in Qodo: the runner commits what you staged and pushes, and Qodo re-reviews the new commit.
 

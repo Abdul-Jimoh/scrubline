@@ -145,7 +145,8 @@ commit_staged() {
   git -C "$WT" diff --cached --quiet && return 0
   local msg="$RUN_DIR/commit-msg.txt"
   [ -s "$msg" ] || printf '%s (#%s)\n\nCommitted by the scheduled agent runner.\n' "$TITLE" "$ISSUE" >"$msg"
-  if git -C "$WT" commit -q -F "$msg"; then
+  # Git's own output (a commit hook's reason for refusing, say) goes to the check log the agent reads on a retry.
+  if git -C "$WT" commit -q -F "$msg" >"$1" 2>&1; then
     rm -f "$msg"
     log "committed the agent's staged work"
   else
@@ -158,9 +159,9 @@ commit_staged() {
 # committed work. The check runs after the commit, so a commit hook that changes content cannot slip past it.
 checks_pass() {
   local logf="$RUN_DIR/check-$1.log"
-  commit_staged || { echo "the staged work could not be committed (a commit hook refused it?)" >"$logf"; return 1; }
+  commit_staged "$logf" || { echo "The runner could not commit the staged work; git's output is above." >>"$logf"; return 1; }
   (cd "$WT" && npm run check) >"$logf" 2>&1 || { log "check $1: npm run check failed"; tail -60 "$logf" >"$logf.tail"; mv "$logf.tail" "$logf"; return 1; }
-  [ -z "$(git -C "$WT" status --porcelain)" ] || { log "check $1: changes left unstaged or uncommitted"; echo "changes not staged for the commit (stage them with git add, or delete them):" >>"$logf"; git -C "$WT" status --short >>"$logf"; return 1; }
+  [ -z "$(git -C "$WT" status --porcelain)" ] || { log "check $1: changes left unstaged or uncommitted"; echo "Changes not in the commit. Stage the ones that belong to the change with git add; scratch files belong in the run folder, not the worktree:" >>"$logf"; git -C "$WT" status --short >>"$logf"; return 1; }
   [ -n "$(git -C "$WT" log --oneline origin/main..HEAD)" ] || { log "check $1: nothing committed"; echo "no commits on the branch" >>"$logf"; return 1; }
   log "check $1: pass"
 }
