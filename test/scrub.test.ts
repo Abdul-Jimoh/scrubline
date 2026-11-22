@@ -368,6 +368,38 @@ describe('numbering', () => {
   });
 });
 
+describe('continuing from an earlier map (issue #4)', () => {
+  const other = j('ops', '@', 'example.org');
+
+  it('keeps earlier placeholders and numbers new values after them', () => {
+    const first = scrub(`mail ${FAKE.EMAIL}`);
+    const { text, map } = scrub(`${other} and ${FAKE.EMAIL}`, { map: first.map });
+    expect(text).toBe('[EMAIL_2] and [EMAIL_1]');
+    expect(map).toEqual({ '[EMAIL_1]': FAKE.EMAIL, '[EMAIL_2]': other });
+  });
+
+  it('never reuses a number from the map, even for a kind not in the input', () => {
+    const { text } = scrub(FAKE.EMAIL, { map: { '[EMAIL_1]': 'x', '[EMAIL_3]': 'y', '[AWS_KEY_1]': 'z' } });
+    expect(text).toBe('[EMAIL_2]');
+  });
+
+  it('a placeholder in the input that is in the map restores to its value', () => {
+    const { map } = scrub(FAKE.EMAIL);
+    const next = scrub('as I said, [EMAIL_1]', { map });
+    expect(restore(next.text, next.map)).toBe(`as I said, ${FAKE.EMAIL}`);
+  });
+
+  it('rejects a map entry that is not a placeholder and a string, without echoing it', () => {
+    const bad = { token: FAKE.GITHUB_TOKEN } as Record<string, string>;
+    expect(() => scrub('x', { map: bad })).toThrow(TypeError);
+    try {
+      scrub('x', { map: bad });
+    } catch (e) {
+      expect(String(e)).not.toContain(FAKE.GITHUB_TOKEN);
+    }
+  });
+});
+
 describe('findings', () => {
   const input = `token ${FAKE.GITHUB_TOKEN} for ${FAKE.EMAIL}`;
   const { findings, map } = scrub(input);
