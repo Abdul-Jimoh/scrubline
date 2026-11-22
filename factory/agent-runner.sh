@@ -110,7 +110,9 @@ run_agent() {
 # The tool list keeps the agent to editing, the project's checks and local git; it cannot run node, push, or touch
 # issues and PRs. `npm run check`, `npm test` and vitest run code the agent can edit, so this limits mistakes, not a
 # determined agent: the ticket text must be the owner's, and the runner posts nothing the agent wrote without
-# scrubbing it with a scrubber the agent cannot change.
+# scrubbing it with a scrubber the agent cannot change. Any `git commit` form is allowed: in the first live run the
+# agent used `-q -m`, `-F <file>` and a heredoc, an allow rule for `git commit -m *` alone denied them all, and its
+# finished work was never committed. Amending and skipping the commit hooks stay denied.
 agent() {
   local prompt="$1" out="$2"
   [ -n "$prompt" ] || needs_help "empty prompt"
@@ -122,8 +124,9 @@ agent() {
       --allowedTools 'Read' 'Edit' 'Write' 'Grep' 'Glob' \
         'Bash(npm run check)' 'Bash(npm run typecheck)' 'Bash(npm test*)' 'Bash(npx vitest *)' 'Bash(npx tsc *)' \
         'Bash(git status*)' 'Bash(git diff*)' 'Bash(git log*)' 'Bash(git show*)' 'Bash(git add *)' \
-        'Bash(git commit -m *)' 'Bash(gh issue view *)' 'Bash(ls *)' \
-      --disallowedTools 'Bash(git push*)' 'Bash(git commit --amend*)' 'Bash(git commit * --amend*)' 'Bash(git reset*)' 'Bash(git rebase*)' \
+        'Bash(git commit *)' 'Bash(gh issue view *)' 'Bash(ls *)' \
+      --disallowedTools 'Bash(git push*)' 'Bash(git commit --amend*)' 'Bash(git commit * --amend*)' \
+        'Bash(git commit *--no-verify*)' 'Bash(git commit -n *)' 'Bash(git commit * -n *)' 'Bash(git reset*)' 'Bash(git rebase*)' \
         'Bash(git checkout*)' 'Bash(gh pr *)' 'Bash(gh issue comment*)' 'Bash(gh issue edit*)' 'Bash(node *)' \
         'WebFetch' 'WebSearch' \
       --output-format json >"$out" 2>"$out.err")
@@ -139,7 +142,19 @@ agent() {
 checks_pass() {
   local logf="$RUN_DIR/check-$1.log"
   (cd "$WT" && npm run check) >"$logf" 2>&1 || { log "check $1: npm run check failed"; tail -60 "$logf" >"$logf.tail"; mv "$logf.tail" "$logf"; return 1; }
-  [ -z "$(git -C "$WT" status --porcelain)" ] || { log "check $1: uncommitted changes"; echo "uncommitted changes:" >>"$logf"; git -C "$WT" status --short >>"$logf"; return 1; }
+  # Work that passes the checks but was left uncommitted is committed by the runner (the repository's commit hooks
+  # still run), with the agent's commit-msg.txt when it wrote one.
+  if [ -n "$(git -C "$WT" status --porcelain)" ]; then
+    local msg="$RUN_DIR/commit-msg.txt"
+    [ -s "$msg" ] || printf '%s (#%s)\n\nCommitted by the scheduled agent runner after npm run check passed.\n' "$TITLE" "$ISSUE" >"$msg"
+    if git -C "$WT" add -A && git -C "$WT" commit -q -F "$msg"; then
+      rm -f "$msg"
+      log "check $1: committed the agent's uncommitted work"
+    else
+      log "check $1: uncommitted changes, and the runner could not commit them"
+      echo "uncommitted changes:" >>"$logf"; git -C "$WT" status --short >>"$logf"; return 1
+    fi
+  fi
   [ -n "$(git -C "$WT" log --oneline origin/main..HEAD)" ] || { log "check $1: nothing committed"; echo "no commits on the branch" >>"$logf"; return 1; }
   log "check $1: pass"
 }
