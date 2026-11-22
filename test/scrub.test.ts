@@ -345,6 +345,13 @@ describe('known limit: keys joined by a character of their own alphabet', () => 
     expect(scrub(`${FAKE.JWT}-${telegram}`).text).toBe('[JWT_1][TELEGRAM_BOT_TOKEN_1]');
   });
 
+  it('a key whose body holds another prefix after - is split; a short start stays visible (found by the test generator)', () => {
+    expect(scrub(j('xox', 'b-s', 'k-', 'A'.repeat(20))).text).toBe(j('xox', 'b-[OPENAI_KEY_1]'));
+    expect(scrub(j('xox', 'b-1234-s', 'k-', 'A'.repeat(20))).text).toBe(j('xox', 'b-1234-[OPENAI_KEY_1]'));
+    // Long enough for its own format, the start is masked too.
+    expect(scrub(j('xox', 'b-123456789-s', 'k-', 'A'.repeat(20))).text).toBe('[SLACK_TOKEN_1][OPENAI_KEY_1]');
+  });
+
   it('a JWT runs on the same way into a SendGrid key', () => {
     expect(scrub(`${FAKE.JWT}_${FAKE.SENDGRID_KEY}`).text).toBe(`[JWT_1]${FAKE.SENDGRID_KEY.slice(2)}`);
   });

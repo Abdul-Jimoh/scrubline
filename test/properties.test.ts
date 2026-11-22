@@ -38,7 +38,8 @@ const whole = fc.oneof(
   token('sk-ant-api03-', B64URL, 80, 95),
   token('sk-proj-', B64URL, 40, 60),
   token('glpat-', B64URL, 20, 26),
-  token('xoxb-', ALNUM + '-', 20, 50),
+  // A body holding `sk-` after a `-` is split with an OpenAI-style key: README "Known limits".
+  token('xoxb-', ALNUM + '-', 20, 50).filter((t) => !/(?:^xoxb-|-)sk-/.test(t)),
   token('AIza', ALNUM + '_-', 35),
   token('sk_live_', ALNUM, 24, 99),
   token('whsec_', ALNUM, 32),

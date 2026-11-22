@@ -130,6 +130,9 @@ and streaming.
 - A key whose own characters include `_` or `-` (JWT, Anthropic, OpenAI, GitHub fine-grained, GitLab, Slack, SendGrid)
   runs on through a `_` or `-` into whatever follows. When that is a SendGrid key (`sk-ant-…_SG.….…`), the part from
   its first `.` on stays visible. (A Telegram token after such a key is masked whole: it is matched first.)
+- A key whose body holds another format's prefix after a `-` (`xoxb-…-sk-…`) is split between the two kinds. When
+  the part before is too short for its own format, it stays visible: at most the prefix and 9 characters
+  (`xoxb-1234-`); the rest is masked.
 - `user:password@host` with no `scheme://` in front (`curl -u`, some config formats) is not detected.
 - The CLI reads its input as UTF-8: a byte that is not valid UTF-8 comes out as U+FFFD (`�`).
 - A private key block is masked from BEGIN to the next END line within 64 KB, even when the BEGIN belonged to a
