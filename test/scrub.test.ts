@@ -335,6 +335,9 @@ describe('known limit: keys joined by a character of their own alphabet', () => 
     const half = telegram.slice(telegram.indexOf(':'));
     expect(scrub(`${FAKE.OPENAI_KEY}_${telegram}`).text).toBe(`[OPENAI_KEY_1]${half}`);
     expect(scrub(`${FAKE.SLACK_TOKEN}-${telegram}`).text).toBe(`[SLACK_TOKEN_1]${half}`);
+    // A JWT runs on the same way.
+    expect(scrub(`${FAKE.JWT}-${telegram}`).text).toBe(`[JWT_1]${half}`);
+    expect(scrub(`${FAKE.JWT}_${FAKE.SENDGRID_KEY}`).text).toBe(`[JWT_1]${FAKE.SENDGRID_KEY.slice(2)}`);
   });
 });
 

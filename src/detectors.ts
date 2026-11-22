@@ -287,7 +287,8 @@ function scanAuthority(input: string, k: number, pastPath: boolean): AuthoritySc
 
 /**
  * Passwords in URLs: `scheme://user:password@host`. Only the password is masked. Trade-off: text glued to the host by
- * any character that does not end a URL (anything but whitespace, a quote, `<>{}|` and a backslash: `,` `'` `=` `:` …)
+ * any character that does not end a URL (anything but whitespace, control characters, `"`, `` ` ``, `<>{}|`, a backslash
+ * and `/?#`: so `,` `'` `=` `:` and the rest glue)
  * and containing a later `@` (`url='…@db',email='jane@b.co'`) is masked as part of the password, host included; an
  * address glued on that way loses its name into the mask and keeps its domain visible.
  *

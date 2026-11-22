@@ -99,10 +99,11 @@ streaming and the CLI.
 - A URL password starting with the text `[URL_PASSWORD_N]`, alone or right after a key (it reads as
   already-scrubbed output), holding `://`, or starting with `//`, is not masked.
 - A URL's password runs to the last `@` before the host ends, as URL parsers read it. Text glued to the host by any
-  character other than whitespace, a quote, `<`, `>`, `{`, `}`, `|` or a backslash, and holding a later `@`
+  character that does not end a URL (anything but whitespace, a control character, `"`, `` ` ``, `<`, `>`, `{`, `}`,
+  `|`, a backslash, `/`, `?` or `#`; a `'` does not end it), and holding a later `@`
   (`url='postgres://…@db',email='jane@example.com'`), is masked with the password, host included; an address glued on
   that way loses its name into the mask and its domain stays visible.
-- A key whose own characters include `_` or `-` (Anthropic, OpenAI, GitHub fine-grained, GitLab, Slack, SendGrid)
+- A key whose own characters include `_` or `-` (JWT, Anthropic, OpenAI, GitHub fine-grained, GitLab, Slack, SendGrid)
   runs on through a `_` or `-` into whatever follows. When that is another key with a `.` or `:` in it
   (`sk-ant-…_SG.….…`, `sk-proj-…_123456789:AAH…`), the part from the `.` or `:` on stays visible.
 - `user:password@host` with no `scheme://` in front (`curl -u`, some config formats) is not detected.
