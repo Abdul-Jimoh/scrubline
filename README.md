@@ -56,8 +56,8 @@ pbpaste | node dist/cli.js restore --map ~/.scrubline/map.json
 
 `scrubline [file] [--map <file>] [--summary]` masks a file or stdin to stdout; every other byte is left as it was.
 `--map` keeps the originals in a JSON file (mode 0600) and adds to it on each run, so a value keeps its placeholder
-across pastes. Runs that share a map take turns (a `.lock` file next to it), a symlinked map is written through to its
-target, and placeholder text you typed yourself is recorded as standing for itself, so no later run gives it a value.
+across pastes. Runs that share a map take turns (a `.lock` file next to it holds the running process's id; a lock left by a run that
+was stopped is taken over), a symlinked map is written through to its target, and placeholder text you typed yourself is recorded as standing for itself, so no later run gives it a value.
 `--summary` prints a count per kind to stderr. `scrubline restore [file] --map <file>` puts the originals back.
 Errors exit with code 2 and never show input text, map values, arguments or file names; a reader that stops early
 (`| head`) is not an error. From code, the same is `scrub(text, { map })`.
@@ -150,7 +150,7 @@ and streaming.
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
 | In generated documents (fake keys of every format, armoured key blocks, emails, URLs with passwords, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid; separated by whitespace, quotes or escapes, every character of every planted value is inside a mask | `test/properties.test.ts` |
 | URL passwords: any scheme, only the password masked, encoded passwords and ones holding a raw `@`, `:`, `/`, `?` or `#`, ports, IPv6 hosts and path or query look-alikes kept, JSON (slash-escaped, `\u`-escaped, nested) stays valid, a key as the user name or inside the password keeps its type and does not hide the password, and the limits above | `test/scrub.test.ts`: "passwords in URLs" |
-| The CLI: bytes kept (BOM, CRLF, non-ASCII, no final newline), file or stdin, the map file (mode 0600 new or rewritten, merged across runs and across 8 overlapping runs, never reassigned, symlinks followed, leftover temporary files removed), typed placeholders kept, restore, `--summary`, `--`, exit codes, `\| head`, and errors that show no input, map value or argument | `test/cli.test.ts` (runs the built `dist/cli.js`); `test/scrub.test.ts`: "continuing from an earlier map" |
+| The CLI: bytes kept (BOM, CRLF, non-ASCII, no final newline), file or stdin, the map file (mode 0600 new or rewritten, merged across runs and across 8 overlapping runs, never reassigned, symlinks followed, leftover temporary files removed), typed placeholders kept, a stopped run's lock taken over and a live one waited for, restore, `--summary`, `--`, exit codes, `\| head`, and errors that show no input, map value or argument | `test/cli.test.ts` (runs the built `dist/cli.js`); `test/scrub.test.ts`: "continuing from an earlier map" |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
 | Scan time stays linear: twenty crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; under 40 ms and 140–200 ms on an M-series laptop) |
 | A 12 MB key block with no END line is masked rather than throwing | `test/performance.test.ts`: "very large input" |

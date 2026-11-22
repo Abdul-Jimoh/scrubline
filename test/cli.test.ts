@@ -23,8 +23,11 @@ afterAll(() => {
   }
 });
 
+// Commands run in an empty folder, so a regression that writes a file by mistake cannot drop one in the repo.
+let cwd = '';
 function cli(args: string[], input: string | Buffer = '') {
-  const r = spawnSync(process.execPath, [CLI, ...args], { input });
+  cwd ||= tmp();
+  const r = spawnSync(process.execPath, [CLI, ...args], { input, cwd });
   return { code: r.status, stdout: r.stdout.toString('utf8'), stderr: r.stderr.toString('utf8'), raw: r.stdout };
 }
 
@@ -37,7 +40,7 @@ const tmp = () => {
 /** Runs the command without waiting, so several can overlap. */
 function cliAsync(args: string[], input: string): Promise<{ code: number | null; stdout: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CLI, ...args]);
+    const child = spawn(process.execPath, [CLI, ...args], { cwd: tmp() });
     let stdout = '';
     child.stdout.on('data', (d) => (stdout += d));
     child.on('close', (code) => resolve({ code, stdout }));
@@ -102,6 +105,14 @@ describe('scrubline (issue #4)', () => {
     const dir = tmp();
     mkdirSync(join(dir, 'private'));
     symlinkSync(join(dir, 'private', 'map.json'), join(dir, 'link.json'));
+    // A chain of links whose last target does not exist yet.
+    symlinkSync(join(dir, 'link2.json'), join(dir, 'chain.json'));
+    symlinkSync(join(dir, 'deep', 'end.json'), join(dir, 'link2.json'));
+    cli(['--map', join(dir, 'chain.json')], other);
+    expect(JSON.parse(readFileSync(join(dir, 'deep', 'end.json'), 'utf8'))).toEqual({ '[EMAIL_1]': other });
+    rmSync(join(dir, 'deep'), { recursive: true });
+    rmSync(join(dir, 'chain.json'));
+    rmSync(join(dir, 'link2.json'));
     cli(['--map', join(dir, 'link.json')], FAKE.EMAIL);
     expect(statSync(join(dir, 'link.json'), { throwIfNoEntry: false })).toBeDefined();
     expect(readdirSync(dir).sort()).toEqual(['link.json', 'private']);
@@ -133,11 +144,34 @@ describe('scrubline (issue #4)', () => {
     expect(cli(['restore', '--map', map], next.stdout).stdout).toBe(`as I said, ${FAKE.EMAIL} and ${other}`);
   });
 
-  it('-- ends the options, so a file name may start with -', () => {
+  it('-- ends the options, so a file name may start with - or be named restore', () => {
     const dir = tmp();
     writeFileSync(join(dir, '-notes.txt'), FAKE.EMAIL);
-    const r = spawnSync(process.execPath, [CLI, '--', '-notes.txt'], { cwd: dir });
-    expect(r.stdout.toString()).toBe('[EMAIL_1]');
+    writeFileSync(join(dir, 'restore'), FAKE.AWS_KEY);
+    expect(spawnSync(process.execPath, [CLI, '--', '-notes.txt'], { cwd: dir }).stdout.toString()).toBe('[EMAIL_1]');
+    expect(spawnSync(process.execPath, [CLI, '--', 'restore'], { cwd: dir }).stdout.toString()).toBe('[AWS_KEY_1]');
+  });
+
+  it('a lock left by a run that was stopped is taken over (found by the verifier)', () => {
+    const map = join(tmp(), 'map.json');
+    // A process id that is not running: a finished child's.
+    const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString();
+    writeFileSync(`${map}.lock`, `${dead}\n`);
+    const t = Date.now();
+    const r = cli(['--map', map], FAKE.EMAIL);
+    expect(r).toMatchObject({ code: 0, stdout: '[EMAIL_1]', stderr: '' });
+    expect(Date.now() - t).toBeLessThan(5000);
+    expect(readdirSync(dirname(map))).toEqual(['map.json']);
+  });
+
+  it('a lock held by a live run is waited for, not taken over', async () => {
+    const map = join(tmp(), 'map.json');
+    writeFileSync(`${map}.lock`, `${process.pid}\n`); // this test process, which is alive
+    const pending = cliAsync(['--map', map], FAKE.EMAIL);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(readdirSync(dirname(map))).toEqual(['map.json.lock']);
+    rmSync(`${map}.lock`);
+    expect(await pending).toMatchObject({ code: 0, stdout: '[EMAIL_1]' });
   });
 
   it('a reader that closes early is not an error (found by the verifier)', () => {
@@ -179,7 +213,7 @@ describe('scrubline (issue #4)', () => {
     }
 
     it('an unknown option, or too many files', () => {
-      expectError(cli(['--nope'], secret), 'unknown option --nope');
+      expectError(cli(['--nope'], secret), 'unknown option (see --help)');
       expectError(cli(['a', 'b'], secret), 'give at most one input file');
       expectError(cli(['--map'], secret), '--map needs a file name');
       // The next option is not a file name: it once received every secret, in a file named `--summary`.
@@ -189,6 +223,10 @@ describe('scrubline (issue #4)', () => {
     it('an argument is never echoed: it may be text pasted in place of a file name (found by the verifier)', () => {
       expectError(cli([`deploy with ${secret}`]), 'cannot read the input file');
       expectError(cli([`-${secret}`]), 'unknown option');
+      // A lowercase passphrase looks like an option name; it is not echoed either.
+      const r = cli(['--correct-horse-battery']);
+      expect(r.code).toBe(2);
+      expect(r.stderr).not.toContain('horse');
       expectError(cli(['--map', join(tmp(), `${secret}.json`), 'restore']), 'the map file does not exist');
     });
 

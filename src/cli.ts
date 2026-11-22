@@ -25,9 +25,8 @@ Exit codes: 0 done, 2 usage or file error, 1 unexpected error.`;
 
 const PLACEHOLDER = /\[[A-Z][A-Z0-9_]*_\d+\]/g;
 const PLACEHOLDER_KEY = /^\[[A-Z][A-Z0-9_]*_\d+\]$/;
-const KNOWN_OPTION = /^--?[a-z][a-z-]{0,20}$/;
-/** How long a run waits for another run that holds the map file. */
-const LOCK_WAIT_MS = 10_000;
+/** How long a run waits for another live run that holds the map file. */
+const LOCK_WAIT_MS = 5 * 60_000;
 
 /** A failure to report as `scrubline: <message>` and exit 2. The message names what failed, never content. */
 class UsageError extends Error {}
@@ -43,10 +42,13 @@ function parseArgs(argv: readonly string[]): Args {
   const args: Args = { command: 'scrub', summary: false };
   const positional: string[] = [];
   let options = true;
+  let beforeDashDash = 0;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (!options || a === '-' || !a.startsWith('-')) positional.push(a);
-    else if (a === '--') options = false;
+    if (!options || a === '-' || !a.startsWith('-')) {
+      positional.push(a);
+      if (options) beforeDashDash++;
+    } else if (a === '--') options = false;
     else if (a === '-h' || a === '--help') return { command: 'help', summary: false };
     else if (a === '--summary') args.summary = true;
     else if (a === '--map' || a.startsWith('--map=')) {
@@ -54,9 +56,10 @@ function parseArgs(argv: readonly string[]): Args {
       // `--map --summary` would otherwise write every secret to a file named `--summary`.
       if (!value || value.startsWith('-')) throw new UsageError('--map needs a file name');
       args.map = value;
-    } else throw new UsageError(KNOWN_OPTION.test(a) ? `unknown option ${a}` : 'unknown option');
+    } else throw new UsageError('unknown option (see --help)');
   }
-  if (positional[0] === 'restore') {
+  // After `--`, `restore` is a file name.
+  if (positional[0] === 'restore' && beforeDashDash > 0) {
     args.command = 'restore';
     positional.shift();
   }
@@ -113,19 +116,45 @@ function mapTarget(file: string): string {
   try {
     return realpathSync(file);
   } catch {
-    try {
-      return resolve(dirname(file), readlinkSync(file));
-    } catch {
-      throw new UsageError('cannot read the map file');
+    // A dangling link, maybe through other links: follow each hop to the file that does not exist yet.
+    let target = file;
+    for (let hops = 0; hops < 40; hops++) {
+      try {
+        if (!lstatSync(target).isSymbolicLink()) break;
+        target = resolve(dirname(target), readlinkSync(target));
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') return target;
+        throw new UsageError('cannot read the map file');
+      }
     }
+    throw new UsageError('cannot read the map file');
   }
 }
 
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+/** Whether the run that wrote `lock` is still running. An unreadable or half-written lock counts as live. */
+function holderAlive(lock: string): boolean {
+  let pid: number;
+  try {
+    pid = Number.parseInt(readFileSync(lock, 'utf8'), 10);
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
 /**
  * Runs `fn` holding `<map>.lock`, so two runs sharing a map cannot both number from the same old map and then
- * overwrite each other's entries (a placeholder would restore to another run's value).
+ * overwrite each other's entries (a placeholder would restore to another run's value). The lock holds the run's
+ * process id, so a lock left by a run that was stopped (Ctrl-C, `kill -9`) is taken over by the next run. A run waits
+ * while the holder is alive, up to five minutes.
  */
 function withLock<T>(target: string, fn: () => T): T {
   const lock = `${target}.lock`;
@@ -140,8 +169,18 @@ function withLock<T>(target: string, fn: () => T): T {
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw new UsageError('cannot write the map file');
-      if (Date.now() - start > LOCK_WAIT_MS)
-        throw new UsageError('the map file is in use by another scrubline run; if none is running, delete the .lock file next to it');
+      if (!holderAlive(lock)) {
+        // Only one waiter wins the rename, so two waiters cannot both remove a fresh lock.
+        const claimed = `${lock}.${process.pid}.stale`;
+        try {
+          renameSync(lock, claimed);
+          rmSync(claimed, { force: true });
+        } catch {
+          // Another waiter took it over first.
+        }
+        continue;
+      }
+      if (Date.now() - start > LOCK_WAIT_MS) throw new UsageError('the map file is still in use by another scrubline run');
     }
   }
   try {
