@@ -6,7 +6,7 @@ After your last attempt, `npm run check` failed or the work was not committed. T
 `git log origin/main..HEAD` show what is committed.
 
 Find the cause, fix it (follow `AGENTS.md`) and run `npm run check` until it passes. Stage your change with
-`git add <files>`, keep scratch files in `{{RUN_DIR}}`, and write the commit message to `{{RUN_DIR}}/commit-msg.txt`. Do
+`git add <files>`, keep scratch files in `{{RUN_DIR}}`, and write the commit message to `{{RUN_DIR}}/commit-msg.txt`. No attribution lines (a co-author trailer naming an AI, "Generated with"): the repository's commit-msg hook refuses them. Do
 not commit, push, open a pull request, or touch any issue: the runner commits what you staged. Update `{{RUN_DIR}}/report.md`.
 
 If the failure is outside this ticket, or you cannot fix it, write the reason to `{{RUN_DIR}}/blocker.md` and stop.
