@@ -464,6 +464,29 @@ describe('home-directory paths (issue #5)', () => {
     expect(scrub(escaped).map).toEqual({ '[HOME_USER_1]': String.raw`jos\u00e9` });
   });
 
+  it('an ASCII letter written as \\uXXXX is part of the name too, so JSON stays valid (found by Qodo in the review of PR #18)', () => {
+    for (const [doc, name] of <[string, string][]>[
+      [String.raw`"/home/\u006aane/x"`, String.raw`\u006aane`],
+      [String.raw`"/home/ja\u006Ee/x"`, String.raw`ja\u006Ee`],
+      [String.raw`"C:\\Users\\\u006aane\\x"`, String.raw`\u006aane`],
+    ]) {
+      const { text, map } = scrub(doc);
+      expect(Object.values(map), doc).toEqual([name]);
+      expect(JSON.parse(text), doc).toMatch(/[/\\]\[HOME_USER_1\][/\\]x$/);
+    }
+    // An escaped separator or quote still ends the name.
+    expect(scrub(String.raw`"/home/jane\u002fx"`).map).toEqual({ '[HOME_USER_1]': 'jane' });
+    expect(scrub(String.raw`"/home/jane\u0022x"`).map).toEqual({ '[HOME_USER_1]': 'jane' });
+  });
+
+  it('a Windows home root in any case, and FILE:// in any case (found by Qodo in the review of PR #18)', () => {
+    for (const root of ['uSeRs', 'USers', 'usERS'])
+      expect(mask(`C:\\${root}\\jane\\x`), root).toBe(`C:\\${root}\\[HOME_USER_1]\\x`);
+    expect(mask(String.raw`/home/d:\uSeRs\bob`)).toBe(String.raw`/home/d:\uSeRs\[HOME_USER_1]`);
+    expect(mask('FILE:///Users/alice/x')).toBe('FILE:///Users/[HOME_USER_1]/x');
+    expect(mask('File:///home/alice/x')).toBe('File:///home/[HOME_USER_1]/x');
+  });
+
   it('a name that is also an address is masked as the user name; a key in the name keeps its type', () => {
     expect(mask(`/home/${FAKE.EMAIL}/x`)).toBe('/home/[HOME_USER_1]/x');
     expect(mask(`/home/${FAKE.AWS_KEY}/x`)).toBe('/home/[AWS_KEY_1]/x');

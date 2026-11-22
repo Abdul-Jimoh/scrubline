@@ -369,7 +369,7 @@ function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
  * (`<jwt>-C:\Users\…`) runs on through it, and the name after it must still be masked (found by the test generator).
  * `\\+` backtracks only over its own run, which follows one drive letter: linear.
  */
-const HOME_PREFIX = /\/(?:Users|home)\/|[A-Za-z\0]:(\\+|\/)(?:[Uu]sers|USERS)\1/g;
+const HOME_PREFIX = /\/(?:Users|home)\/|[A-Za-z\0]:(\\+|\/)[Uu][Ss][Ee][Rr][Ss]\1/g;
 /**
  * Before `/Users` or `/home`: not inside a path or a word (`foo/Users/x`, `/opt/home/x`, `./home/x`), except after an
  * escape (`\n/home/jane` in JSON) or `file://`. Trade-off: a relative path such as `../home/jane` or `x//home/jane`
@@ -377,14 +377,15 @@ const HOME_PREFIX = /\/(?:Users|home)\/|[A-Za-z\0]:(\\+|\/)(?:[Uu]sers|USERS)\1/
  */
 const POSIX_HOME_START = new RegExp(start('A-Za-z0-9./'), 'y');
 /**
- * Right after `file://`, or after `://` whose scheme is claimed text: a key glued on by `_` or `-` runs on into `file`
- * (`sk-proj-…_file:///Users/…`), and the name after it must still be masked (found by the test generator).
+ * Right after `file://` in any case (`FILE:///Users/…`), or after `://` whose scheme is claimed text: a key glued on
+ * by `_` or `-` runs on into `file` (`sk-proj-…_file:///Users/…`), and the name after it must still be masked (found
+ * by the test generator).
  */
-const AFTER_FILE_URL = /(?<=(?:file|\0):\/\/)/y;
+const AFTER_FILE_URL = /(?<=(?:file|\0):\/\/)/iy;
 /** Before a drive letter: not glued to a letter or digit (`xC:\Users\…`), except after an escape. */
 const DRIVE_START = new RegExp(start(ALNUM), 'y');
 /** A Windows home prefix (as in `HOME_PREFIX`) starting at `lastIndex`, its drive letter at a boundary. */
-const WINDOWS_PREFIX_AT = new RegExp(`${start(ALNUM)}[A-Za-z]:(\\\\+|/)(?:[Uu]sers|USERS)\\1`, 'y');
+const WINDOWS_PREFIX_AT = new RegExp(`${start(ALNUM)}[A-Za-z]:(\\\\+|/)[Uu][Ss][Ee][Rr][Ss]\\1`, 'y');
 /**
  * Characters that end a user name: whitespace and control characters (`\0`, claimed text, too), quotes, path
  * separators and punctuation that cannot be in a Windows user name, and `(` `)` `` ` `` `{` `}`, which put a path in
@@ -405,13 +406,18 @@ function isNameChar(input: string, i: number): boolean {
   const c = input.charCodeAt(i);
   return c >= 128 || !NAME_END[c];
 }
-/** Whether four characters are the hex of a `\uXXXX` escape for a non-ASCII character. */
-const isNonAsciiEscape = (hex: string): boolean => /^[0-9A-Fa-f]{4}$/.test(hex) && parseInt(hex, 16) >= 0x80;
+/**
+ * Whether four characters are the hex of a `\uXXXX` escape for a character that can be part of a user name: a
+ * non-ASCII letter (`é`) or an ASCII one (`j`, found by Qodo in the review of PR #18). An escaped separator or quote
+ * (`/`, `"`) ends the name.
+ */
+const isNameEscape = (hex: string): boolean =>
+  /^[0-9A-Fa-f]{4}$/.test(hex) && isNameChar(String.fromCharCode(parseInt(hex, 16)), 0);
 
 /**
  * The user name in a home-directory path: `/Users/[HOME_USER_1]/projects`, the rest of the path kept. The name runs to
  * the first character of `NAME_END` or the end of the text; in a POSIX or `\\` (JSON) path, a `\uXXXX` escape for a
- * non-ASCII letter (`jos\u00e9`) is part of it. Trailing dots are left out (`see /home/jane.` ends a sentence);
+ * name character (a letter, ASCII or not) is part of it. Trailing dots are left out (`see /home/jane.` ends a sentence);
  * trade-off: a name that really ends in `.` keeps that dot visible.
  */
 function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
@@ -430,7 +436,7 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
     let e = prefixEnd;
     for (;;) {
       if (isNameChar(input, e)) e++;
-      else if (escapes && input.startsWith('\\u', e) && isNonAsciiEscape(input.slice(e + 2, e + 6))) e += 6;
+      else if (escapes && input.startsWith('\\u', e) && isNameEscape(input.slice(e + 2, e + 6))) e += 6;
       else break;
     }
     // A name run on into the drive letter of a Windows home path (`/Users/jane%20d:\users\bob`) ends before it, so that
