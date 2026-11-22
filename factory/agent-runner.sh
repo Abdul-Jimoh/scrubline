@@ -227,8 +227,9 @@ while :; do
   SHA=$(git -C "$WT" rev-parse HEAD)
   review=$(wait_for_review "$SHA") || needs_help "no completed Qodo review of ${SHA:0:7} after $((REVIEW_TIMEOUT / 60)) minutes"
   printf '%s' "$review" >"$RUN_DIR/review-$ROUND.json"
-  # Open unless its status is one Qodo documents as closed, so a new or renamed status is never read as clean.
-  open=$(jq -e '[(.findings // [])[] | select(.attribution_status | IN("full_implementation","dismissed","detected_after_merge","outdated") | not)]' \
+  # Open unless its status is one Qodo documents as closed (`qodo read pr-review-session findings --help`; a fixed
+  # finding reads `implemented`), so a new or renamed status is never read as clean.
+  open=$(jq -e '[(.findings // [])[] | select(.attribution_status | IN("implemented","full_implementation","dismissed","detected_after_merge","outdated") | not)]' \
     "$RUN_DIR/review-$ROUND.json") || needs_help "could not read Qodo's review of ${SHA:0:7}"
   count=$(printf '%s' "$open" | jq length)
   log "Qodo review of ${SHA:0:7}: $count open finding(s)"
