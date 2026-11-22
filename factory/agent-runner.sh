@@ -146,7 +146,7 @@ wait_for_review() {
   local sha="$1" waited=0 nudged=0 out
   while [ "$waited" -lt "$REVIEW_TIMEOUT" ]; do
     out=$(qodo read pr-review-session findings --pr-url "$PR_URL" --extended 2>/dev/null) || out=""
-    if [ -n "$out" ] && echo "$out" | jq -e --arg sha "$sha" \
+    if [ -n "$out" ] && printf '%s' "$out" | jq -e --arg sha "$sha" \
       '.review_session.commit_sha == $sha and .review_session.status == "completed" and (.qar_operation_result_truncated != true)' >/dev/null 2>&1; then
       printf '%s' "$out"
       return 0
@@ -224,12 +224,12 @@ while :; do
   printf '%s' "$review" >"$RUN_DIR/review-$ROUND.json"
   open=$(jq -e '[(.findings // [])[] | select(.attribution_status | IN("pending","partial_implementation","not_implemented","focus_areas_edited"))]' \
     "$RUN_DIR/review-$ROUND.json") || needs_help "could not read Qodo's review of ${SHA:0:7}"
-  count=$(echo "$open" | jq length)
+  count=$(printf '%s' "$open" | jq length)
   log "Qodo review of ${SHA:0:7}: $count open finding(s)"
   [ "$count" = 0 ] && break
   [ "$ROUND" -ge "$MAX_ROUNDS" ] && needs_help "$count Qodo finding(s) still open after $MAX_ROUNDS fix rounds"
   ROUND=$((ROUND + 1))
-  echo "$open" >"$RUN_DIR/findings-$ROUND.json"
+  printf '%s\n' "$open" >"$RUN_DIR/findings-$ROUND.json"
   run_agent fix-review.md "$RUN_DIR/agent-fix-review-$ROUND.json"
   checks_pass "review-$ROUND" || needs_help "checks failed after review fix round $ROUND"
   [ "$(git -C "$WT" rev-parse HEAD)" = "$SHA" ] && needs_help "the agent changed nothing for $count open finding(s); see its report"
