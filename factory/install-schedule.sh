@@ -18,6 +18,10 @@ fi
 
 # The job runs a copy, so switching branches in this checkout cannot remove the runner from under it. Run this
 # script again after changing the runner or its prompts.
+# Values go into XML.
+xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+case "$SRC" in /private/tmp/* | /tmp/*) echo "run this from your clone of the repo, not a temporary folder" >&2; exit 1 ;; esac
+
 mkdir -p "$WORK" "$(dirname "$PLIST")"
 rm -rf "$WORK/factory"
 cp -R "$SRC/factory" "$WORK/factory"
@@ -26,19 +30,19 @@ cat >"$PLIST" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$LABEL</string>
+  <key>Label</key><string>$(xml "$LABEL")</string>
   <key>ProgramArguments</key>
-  <array><string>/bin/bash</string><string>$WORK/factory/agent-runner.sh</string></array>
+  <array><string>/bin/bash</string><string>$(xml "$WORK/factory/agent-runner.sh")</string></array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>SCRUBLINE_SRC</key><string>$SRC</string>
-    <key>SCRUBLINE_WORK</key><string>$WORK</string>
-    <key>HOME</key><string>$HOME</string>
+    <key>SCRUBLINE_SRC</key><string>$(xml "$SRC")</string>
+    <key>SCRUBLINE_WORK</key><string>$(xml "$WORK")</string>
+    <key>HOME</key><string>$(xml "$HOME")</string>
   </dict>
   <key>StartInterval</key><integer>$INTERVAL</integer>
   <key>RunAtLoad</key><false/>
-  <key>StandardOutPath</key><string>$WORK/launchd.log</string>
-  <key>StandardErrorPath</key><string>$WORK/launchd.log</string>
+  <key>StandardOutPath</key><string>$(xml "$WORK/launchd.log")</string>
+  <key>StandardErrorPath</key><string>$(xml "$WORK/launchd.log")</string>
 </dict>
 </plist>
 EOF

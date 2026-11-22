@@ -1,18 +1,20 @@
 #!/bin/bash
 # Scrubline's scheduled agent. Run by launchd every 15 minutes (factory/install-schedule.sh), or by hand.
 #
-# Each run takes at most one ticket: the oldest open issue labelled `ready-for-agent`. It
+# Each run takes at most one ticket: the oldest open issue labelled `ready-for-agent` and written by the repository
+# owner (anyone can open an issue; only the owner's text is handed to the agent). It
 #   1. claims it (label `agent-working`) and works in a fresh worktree from origin/main;
 #   2. runs Claude Code headless on the ticket with AGENTS.md (factory/prompts/implement.md);
 #   3. runs `npm run check` itself, and gives the agent the failure up to MAX_ATTEMPTS times;
 #   4. pushes the branch and opens a PR with the ticket link and acceptance criteria;
 #   5. waits for Qodo's review of the exact head commit, and if findings are open, gives them to the agent
 #      (factory/prompts/fix-review.md), checks again and pushes, up to MAX_REVIEW_ROUNDS times;
-#   6. stops with label `agent-needs-help` and a comment on the issue whenever a limit is hit.
-# It never merges: the human does.
+#   6. stops with label `agent-needs-help` and a comment on the issue whenever a limit is hit or something fails.
+# It never merges: the human does. Text the agent wrote is scrubbed with Scrubline before it is posted.
 set -uo pipefail
 
 REPO=${SCRUBLINE_REPO:-Abdul-Jimoh/scrubline}
+OWNER=${REPO%%/*}
 SRC=${SCRUBLINE_SRC:-$(cd "$(dirname "$0")/.." && pwd)}   # a clone of the repo (any branch checked out)
 WORK=${SCRUBLINE_WORK:-$HOME/.scrubline-factory}          # worktrees and run logs, outside the repo
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-3}          # implement + check attempts
@@ -25,40 +27,67 @@ PROMPTS="$(cd "$(dirname "$0")" && pwd)/prompts"
 export PATH="$HOME/.qodo/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 mkdir -p "$WORK/runs"
-# One run at a time.
-if ! mkdir "$WORK/lock" 2>/dev/null; then exit 0; fi
-trap 'rmdir "$WORK/lock"' EXIT
+# One run at a time. The lock holds this run's pid; a lock whose process is gone (power loss, kill -9) is taken over.
+LOCK="$WORK/lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  holder=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then exit 0; fi
+  # A lock with no pid yet is only stale once it is over a minute old.
+  if [ -z "$holder" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then exit 0; fi
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || exit 0
+fi
+echo $$ >"$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
 
 # A ticket already claimed (working, or stopped for help) blocks the queue until a human clears it.
-claimed=$(gh issue list -R "$REPO" --state open --label agent-working --json number --jq 'length')
+claimed=$(gh issue list -R "$REPO" --state open --label agent-working --json number --jq 'length') || exit 0
 [ "$claimed" = 0 ] || exit 0
-ISSUE=$(gh issue list -R "$REPO" --state open --label ready-for-agent --json number,createdAt \
-  --jq 'sort_by(.createdAt) | .[0].number // empty')
+ISSUE=$(gh issue list -R "$REPO" --state open --label ready-for-agent --author "$OWNER" --json number,createdAt \
+  --jq 'sort_by(.createdAt) | .[0].number // empty') || exit 0
 [ -n "$ISSUE" ] || exit 0
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-issue-$ISSUE"
 RUN_DIR="$WORK/runs/$RUN_ID"
 BRANCH="agent/issue-$ISSUE"
 WT="$WORK/worktrees/issue-$ISSUE"
+PR_URL=""
+PUSHED=no
 mkdir -p "$RUN_DIR"
-log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$RUN_DIR/run.log"; }
+# Log lines go to the run log and stderr, never stdout, so they cannot mix into a captured value.
+log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$RUN_DIR/run.log" >&2; }
 
-comment() { gh issue comment "$ISSUE" -R "$REPO" --body "$1" >/dev/null; }
-
-needs_help() {
-  log "STOP: $1"
-  local detail=""
-  [ -f "$RUN_DIR/blocker.md" ] && detail=$'\n\n**What the agent wrote:**\n\n'"$(head -c 3000 "$RUN_DIR/blocker.md")"
-  comment "The scheduled agent stopped and needs a human: **$1**${detail}
-
-Run \`$RUN_ID\`. Branch \`$BRANCH\`${PR_URL:+, PR $PR_URL}. Remove \`agent-needs-help\` and \`agent-working\` to release the queue."
-  gh issue edit "$ISSUE" -R "$REPO" --add-label agent-needs-help >/dev/null
-  exit 1
+# Text the agent wrote (on stdin), masked with Scrubline itself before it reaches a public comment or PR body.
+scrubbed() {
+  (cd "$WT" 2>/dev/null && node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const { scrub } = await import(process.cwd() + "/dist/index.js");
+    process.stdout.write(scrub(readFileSync(0, "utf8")).text);') 2>/dev/null ||
+    echo "_(not shown: it could not be scrubbed)_"
 }
 
-# Fills {{NAME}} in a prompt template from the shell variables of the same name.
+comment() { gh issue comment "$ISSUE" -R "$REPO" --body "$1" >/dev/null || log "could not comment on #$ISSUE"; }
+
+needs_help() {
+  trap - INT TERM
+  log "STOP: $1"
+  local detail="" where
+  [ -s "$RUN_DIR/blocker.md" ] && detail=$'\n\n**What the agent wrote:**\n\n'"$(head -c 3000 "$RUN_DIR/blocker.md" | scrubbed)"
+  if [ "$PUSHED" = yes ]; then where="Branch \`$BRANCH\`${PR_URL:+, PR $PR_URL}."
+  else where="Nothing was pushed; the local work stays in the runner's worktree until the next run starts the ticket over."; fi
+  comment "The scheduled agent stopped and needs a human: **$1**${detail}
+
+Run \`$RUN_ID\`. $where Remove \`agent-needs-help\` and \`agent-working\` to release the queue; add \`ready-for-agent\` again to retry from scratch."
+  gh issue edit "$ISSUE" -R "$REPO" --add-label agent-needs-help >/dev/null || log "could not label #$ISSUE"
+  exit 1
+}
+trap 'needs_help "the run was interrupted"' INT TERM
+
+# Fills {{NAME}} in a prompt template from the shell variables of the same name. A missing or empty template stops
+# the run rather than sending the agent an empty prompt.
 render() {
   local text
+  [ -s "$1" ] || needs_help "prompt template $(basename "$1") is missing"
   text=$(cat "$1")
   for name in ISSUE BRANCH RUN_DIR ATTEMPT MAX_ATTEMPTS PREV PR_URL SHA ROUND MAX_ROUNDS; do
     text=${text//\{\{$name\}\}/${!name:-}}
@@ -67,19 +96,26 @@ render() {
 }
 
 # Runs Claude Code headless in the worktree with the rendered prompt. Settings hooks still apply (no --bare).
+# The tool list keeps the agent to editing, the project's checks and local git; it cannot run node, push, or touch
+# issues and PRs. `npm run check` runs scripts the agent can edit, so this limits mistakes, not a determined agent:
+# the ticket text must be the owner's, and the runner posts nothing the agent wrote without scrubbing it.
 agent() {
   local prompt="$1" out="$2"
+  [ -n "$prompt" ] || needs_help "empty prompt"
   log "agent: $(basename "$out")"
   (cd "$WT" && perl -e 'alarm shift; exec @ARGV' "$AGENT_TIMEOUT" \
     claude -p "$prompt" \
+      --add-dir "$RUN_DIR" \
       --permission-mode acceptEdits \
       --allowedTools 'Read' 'Edit' 'Write' 'Grep' 'Glob' \
-        'Bash(npm run *)' 'Bash(npm ci)' 'Bash(npx vitest *)' 'Bash(npx tsc *)' 'Bash(node *)' \
-        'Bash(git status*)' 'Bash(git diff*)' 'Bash(git log*)' 'Bash(git show*)' 'Bash(git add *)' 'Bash(git commit *)' \
-        'Bash(gh issue view *)' 'Bash(ls *)' 'Bash(cat *)' \
-      --disallowedTools 'Bash(git push*)' 'Bash(gh pr *)' 'Bash(gh issue comment*)' 'Bash(gh issue edit*)' \
+        'Bash(npm run check)' 'Bash(npm run typecheck)' 'Bash(npm test*)' 'Bash(npx vitest *)' 'Bash(npx tsc *)' \
+        'Bash(git status*)' 'Bash(git diff*)' 'Bash(git log*)' 'Bash(git show*)' 'Bash(git add *)' \
+        'Bash(git commit -m *)' 'Bash(gh issue view *)' 'Bash(ls *)' \
+      --disallowedTools 'Bash(git push*)' 'Bash(git commit --amend*)' 'Bash(git reset*)' 'Bash(git rebase*)' \
+        'Bash(git checkout*)' 'Bash(gh pr *)' 'Bash(gh issue comment*)' 'Bash(gh issue edit*)' 'Bash(node *)' \
+        'WebFetch' 'WebSearch' \
       --output-format json >"$out" 2>"$out.err")
-  log "agent exit $? ($(node -e 'try{const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`${r.num_turns} turns, ${Math.round(r.duration_ms/1000)} s`)}catch{console.log("no result")}' "$out"))"
+  log "agent exit $? ($(jq -r '"\(.num_turns) turns, \((.duration_ms // 0) / 1000 | floor) s"' "$out" 2>/dev/null || echo "no result"))"
 }
 
 # True when `npm run check` passes and the branch has committed work and a clean tree.
@@ -101,7 +137,7 @@ wait_for_review() {
       printf '%s' "$out"
       return 0
     fi
-    # Qodo reviews new commits on its own; ask once if it has not started after five minutes.
+    # Qodo reviews new commits on its own; ask once if it has not finished after five minutes.
     if [ "$waited" -ge 300 ] && [ "$nudged" = 0 ]; then
       gh pr comment "$PR_URL" --body '/agentic_review' >/dev/null && log "asked Qodo to review $sha"
       nudged=1
@@ -112,60 +148,69 @@ wait_for_review() {
   return 1
 }
 
-open_findings() { jq '[.findings[] | select(.attribution_status | IN("pending","partial_implementation","not_implemented","focus_areas_edited"))]'; }
+# The agent/ branch belongs to the runner: a retry starts from main and replaces what a stopped run pushed.
+push() { git -C "$WT" push -q --force -u origin "$BRANCH" && PUSHED=yes; }
 
 # --- Claim the ticket ------------------------------------------------------------------------------------------
 log "picked issue #$ISSUE"
-gh issue edit "$ISSUE" -R "$REPO" --remove-label ready-for-agent --add-label agent-working >/dev/null
+gh issue edit "$ISSUE" -R "$REPO" --remove-label ready-for-agent --add-label agent-working >/dev/null ||
+  { log "could not claim #$ISSUE"; exit 1; }
 comment "Picked up by the scheduled agent (run \`$RUN_ID\`), on branch \`$BRANCH\`. Limits: $MAX_ATTEMPTS attempts to pass the checks, $MAX_REVIEW_ROUNDS rounds of review fixes."
-gh issue view "$ISSUE" -R "$REPO" --json title,body,url >"$RUN_DIR/issue.json"
+gh issue view "$ISSUE" -R "$REPO" --json title,body,url,author >"$RUN_DIR/issue.json" || needs_help "could not read the ticket"
+[ "$(jq -r .author.login "$RUN_DIR/issue.json")" = "$OWNER" ] || needs_help "the ticket is not written by the repository owner"
 TITLE=$(jq -r .title "$RUN_DIR/issue.json")
 ISSUE_URL=$(jq -r .url "$RUN_DIR/issue.json")
 
 git -C "$SRC" fetch -q origin main || needs_help "git fetch failed"
 git -C "$SRC" worktree remove --force "$WT" 2>/dev/null
 git -C "$SRC" worktree add -q -B "$BRANCH" "$WT" origin/main || needs_help "could not create the worktree"
-(cd "$WT" && npm ci --silent) >"$RUN_DIR/npm-ci.log" 2>&1 || needs_help "npm ci failed"
+(cd "$WT" && npm ci --silent && npm run build --silent) >"$RUN_DIR/npm-ci.log" 2>&1 || needs_help "npm ci or the build failed"
 
 # --- Implement, with a retry limit ------------------------------------------------------------------------------
 ATTEMPT=1
 agent "$(render "$PROMPTS/implement.md")" "$RUN_DIR/agent-implement.json"
 until checks_pass "$ATTEMPT"; do
-  [ -f "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
+  [ -s "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
   [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] && needs_help "checks still failing after $MAX_ATTEMPTS attempts"
   PREV=$ATTEMPT
   ATTEMPT=$((ATTEMPT + 1))
   agent "$(render "$PROMPTS/fix-checks.md")" "$RUN_DIR/agent-fix-checks-$ATTEMPT.json"
 done
-[ -f "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
+[ -s "$RUN_DIR/blocker.md" ] && needs_help "the agent reported a blocker"
 
-# --- Open the PR -----------------------------------------------------------------------------------------------
-git -C "$WT" push -q -u origin "$BRANCH" || needs_help "git push failed"
+# --- Open the PR (or reuse the one a stopped run left) ---------------------------------------------------------
+push || needs_help "git push failed"
 {
   echo "Ticket: $ISSUE_URL (closes #$ISSUE)"
   echo
   echo "Opened by the scheduled agent (\`factory/agent-runner.sh\`, run \`$RUN_ID\`). \`npm run check\` passed on attempt $ATTEMPT of $MAX_ATTEMPTS. A human decides whether to merge."
   echo
-  jq -r .body "$RUN_DIR/issue.json" | awk '/^## Acceptance criteria/{on=1} on'
+  jq -r .body "$RUN_DIR/issue.json" | awk '/^## Acceptance criteria/{on=1; print; next} on && /^## /{exit} on'
   echo
   echo "## Agent's report"
   echo
-  if [ -f "$RUN_DIR/report.md" ]; then head -c 6000 "$RUN_DIR/report.md"; else echo "_The agent wrote no report._"; fi
+  if [ -s "$RUN_DIR/report.md" ]; then head -c 6000 "$RUN_DIR/report.md" | scrubbed; else echo "_The agent wrote no report._"; fi
 } >"$RUN_DIR/pr-body.md"
-PR_URL=$(gh pr create -R "$REPO" --base main --head "$BRANCH" --title "$TITLE (#$ISSUE)" --body-file "$RUN_DIR/pr-body.md") ||
-  needs_help "gh pr create failed"
-log "opened $PR_URL"
+PR_URL=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
+if [ -n "$PR_URL" ]; then
+  gh pr edit "$PR_URL" --body-file "$RUN_DIR/pr-body.md" >/dev/null || log "could not update $PR_URL"
+else
+  PR_URL=$(gh pr create -R "$REPO" --base main --head "$BRANCH" --title "$TITLE (#$ISSUE)" --body-file "$RUN_DIR/pr-body.md") ||
+    needs_help "gh pr create failed"
+fi
+log "PR $PR_URL"
 
 # --- Review loop -----------------------------------------------------------------------------------------------
 MAX_ROUNDS=$MAX_REVIEW_ROUNDS
 ROUND=0
 while :; do
   SHA=$(git -C "$WT" rev-parse HEAD)
-  review=$(wait_for_review "$SHA") || needs_help "no completed Qodo review of $SHA after $((REVIEW_TIMEOUT / 60)) minutes"
-  echo "$review" >"$RUN_DIR/review-$ROUND.json"
-  open=$(echo "$review" | open_findings)
+  review=$(wait_for_review "$SHA") || needs_help "no completed Qodo review of ${SHA:0:7} after $((REVIEW_TIMEOUT / 60)) minutes"
+  printf '%s' "$review" >"$RUN_DIR/review-$ROUND.json"
+  open=$(jq -e '[(.findings // [])[] | select(.attribution_status | IN("pending","partial_implementation","not_implemented","focus_areas_edited"))]' \
+    "$RUN_DIR/review-$ROUND.json") || needs_help "could not read Qodo's review of ${SHA:0:7}"
   count=$(echo "$open" | jq length)
-  log "Qodo review of $SHA: $count open finding(s)"
+  log "Qodo review of ${SHA:0:7}: $count open finding(s)"
   [ "$count" = 0 ] && break
   [ "$ROUND" -ge "$MAX_ROUNDS" ] && needs_help "$count Qodo finding(s) still open after $MAX_ROUNDS fix rounds"
   ROUND=$((ROUND + 1))
@@ -173,10 +218,11 @@ while :; do
   agent "$(render "$PROMPTS/fix-review.md")" "$RUN_DIR/agent-fix-review-$ROUND.json"
   checks_pass "review-$ROUND" || needs_help "checks failed after review fix round $ROUND"
   [ "$(git -C "$WT" rev-parse HEAD)" = "$SHA" ] && needs_help "the agent changed nothing for $count open finding(s); see its report"
-  git -C "$WT" push -q origin "$BRANCH" || needs_help "git push failed"
+  push || needs_help "git push failed"
 done
 
 # --- Hand over -------------------------------------------------------------------------------------------------
-gh issue edit "$ISSUE" -R "$REPO" --remove-label agent-working >/dev/null
+trap - INT TERM
+gh issue edit "$ISSUE" -R "$REPO" --remove-label agent-working >/dev/null || log "could not unlabel #$ISSUE"
 comment "The scheduled agent finished: $PR_URL is ready for a human. \`npm run check\` passes, and Qodo's review of \`${SHA:0:7}\` has no open findings ($ROUND fix round(s)). Run \`$RUN_ID\`."
 log "done: $PR_URL"
