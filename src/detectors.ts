@@ -325,6 +325,24 @@ function alreadyMasked(opaque: readonly [number, number, boolean][], p: number):
   return false;
 }
 
+/**
+ * For `StreamScrubber`: the start of the scheme of the last URL before `end` whose authority may still be open at
+ * `end` (no character that ends a URL since its `://`), or -1. `findUrlPasswords` needs that scheme to find the
+ * password, however long the user name is, so a stream keeps the text from there. Conservative: a backslash escape
+ * that ends a URL is not counted, which only keeps more text.
+ */
+export function openUrlStart(input: string, end: number): number {
+  const sep = Math.max(input.lastIndexOf('://', end - 3), input.lastIndexOf(':\\/\\/', end - 5));
+  if (sep <= 0 || !SCHEME_CHAR.test(input[sep - 1]!)) return -1;
+  for (let k = sep + 1; k < end; k++) {
+    const c = input.charCodeAt(k);
+    if (c < 128 && URL_END[c]) return -1;
+  }
+  let s = sep - 1;
+  while (s > 0 && SCHEME_CHAR.test(input[s - 1]!)) s--;
+  return s;
+}
+
 function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
   for (const m of input.matchAll(URL_SEPARATOR)) {
     if (m.index === 0 || !SCHEME_CHAR.test(input[m.index - 1]!)) continue;

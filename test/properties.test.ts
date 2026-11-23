@@ -278,7 +278,7 @@ describe('properties', () => {
 
   it('a stream of UTF-8 bytes cut anywhere, mid-character included, gives the same result as the decoded whole', () => {
     fc.assert(
-      fc.property(fc.string({ unit: 'binary', maxLength: 300 }), cuts, fc.integer({ min: 32, max: 64 }), (x, at, window) => {
+      fc.property(fc.string({ unit: 'binary', maxLength: 300 }), cuts, fc.integer({ min: 64, max: 96 }), (x, at, window) => {
         const whole = scrub(noLiterals(new TextDecoder().decode(new TextEncoder().encode(x))));
         expect(streamed(noLiterals(x), at, window, true)).toEqual({ text: whole.text, map: whole.map });
       }),
