@@ -13,10 +13,12 @@ untrusted. A missed secret is a leak that cannot be taken back.
 
 - `src/detectors.ts`: the detectors, in priority order (first listed wins an overlap).
 - `src/scrub.ts`: collects spans, assigns placeholders, builds the result; `restore`.
+- `src/stream.ts`: `scrubStream` and `StreamScrubber`: chunked input with the same result as `scrub` of the whole.
 - `src/cli.ts`: the `scrubline` command (stdin or a file to stdout, the map file, `restore`).
 - `test/scrub.test.ts`: examples and regressions. `test/properties.test.ts`: fast-check properties on generated
   documents. `test/performance.test.ts`: crafted inputs that must scan in linear time. `test/cli.test.ts`: builds
-  `dist/` and runs the command as a child process.
+  `dist/` and runs the command as a child process. `test/stream.test.ts`: chunk boundaries, stream limits and
+  memory.
 - `test/fixtures.ts`: one fake sample per detector (`FAKE`), assembled at runtime with `j()`.
 - `factory/`: the scheduled agent. `agent-runner.sh` takes the oldest open issue labelled `ready-for-agent`, runs a
   headless coding agent on it with the prompts in `factory/prompts/`, checks, opens a PR, and works through Qodo's

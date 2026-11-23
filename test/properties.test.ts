@@ -1,6 +1,6 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { restore, scrub } from '../src/index.js';
+import { restore, scrub, StreamScrubber } from '../src/index.js';
 
 // Generated values are fake by construction: random characters in the shape of each format.
 const UP = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -157,6 +157,25 @@ const document = documentWith(separator);
 
 const runs = { numRuns: 500 };
 
+/** Scrubs `x` as a stream, cut at the given points (fractions of its length), and returns the output and map. */
+function streamed(x: string, cuts: readonly number[], window: number, asBytes = false) {
+  const s = new StreamScrubber({ window });
+  const input: string | Uint8Array = asBytes ? new TextEncoder().encode(x) : x;
+  const at = [...new Set(cuts.map((c) => Math.floor(c * input.length)))].sort((a, b) => a - b);
+  let text = '';
+  let last = 0;
+  for (const p of [...at, input.length]) {
+    text += s.push(input.slice(last, p));
+    last = p;
+  }
+  return { text: text + s.end(), map: s.map };
+}
+const cuts = fc.array(fc.double({ min: 0, max: 1, noNaN: true }), { maxLength: 40 });
+/** Several documents in a row, long enough that a stream with a window of 512 to 1,024 writes text out mid-way. */
+const longDocument = fc.array(document, { minLength: 1, maxLength: 6 }).map((ds) => ds.map((d) => d.text).join('\n'));
+/** Placeholder-shaped text written as `(EMAIL_1)`: a stream cannot reserve a placeholder before it arrives. */
+const noLiterals = (x: string) => x.replace(/\[([A-Z][A-Z0-9_]*_\d+)\]/g, '($1)');
+
 describe('properties', () => {
   it('restore(scrub(x)) === x for any string, including unpaired surrogates', () => {
     fc.assert(
@@ -242,6 +261,38 @@ describe('properties', () => {
     fc.assert(
       fc.property(document, ({ text: x }) => {
         expect(scrub(scrub(x).text).findings).toEqual([]);
+      }),
+      runs,
+    );
+  });
+
+  it('a stream cut anywhere gives the same text and map as scrubbing the whole input', () => {
+    // Windows of 512 or more hold every generated match (the longest is a key block of about 450 characters).
+    fc.assert(
+      fc.property(longDocument.map(noLiterals), cuts, fc.integer({ min: 512, max: 1024 }), (x, at, window) => {
+        expect(streamed(x, at, window)).toEqual({ text: scrub(x).text, map: scrub(x).map });
+      }),
+      runs,
+    );
+  });
+
+  it('a stream of UTF-8 bytes cut anywhere, mid-character included, gives the same result as the decoded whole', () => {
+    fc.assert(
+      fc.property(fc.string({ unit: 'binary', maxLength: 300 }), cuts, fc.integer({ min: 32, max: 64 }), (x, at, window) => {
+        const whole = scrub(noLiterals(new TextDecoder().decode(new TextEncoder().encode(x))));
+        expect(streamed(noLiterals(x), at, window, true)).toEqual({ text: whole.text, map: whole.map });
+      }),
+      runs,
+    );
+  });
+
+  it('a stream restores exactly and loses every planted secret, placeholder look-alikes included', () => {
+    fc.assert(
+      fc.property(fc.array(documentWith(separator), { minLength: 1, maxLength: 6 }), cuts, fc.integer({ min: 512, max: 1024 }), (ds, at, window) => {
+        const x = ds.map((d) => d.text).join('\n');
+        const { text, map } = streamed(x, at, window);
+        expect(restore(text, map)).toBe(x);
+        for (const s of ds.flatMap((d) => d.secrets)) expect(text).not.toContain(s);
       }),
       runs,
     );

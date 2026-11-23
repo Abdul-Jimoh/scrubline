@@ -18,7 +18,7 @@ export interface ScrubResult {
   readonly map: ScrubMap;
 }
 
-const PLACEHOLDER = /\[[A-Z][A-Z0-9_]*_\d+\]/g;
+export const PLACEHOLDER = /\[[A-Z][A-Z0-9_]*_\d+\]/g;
 const PLACEHOLDER_KIND = /^\[([A-Z][A-Z0-9_]*)_\d+\]$/;
 
 export interface ScrubOptions {
@@ -31,7 +31,7 @@ export interface ScrubOptions {
   readonly map?: ScrubMap;
 }
 
-interface Span {
+export interface Span {
   kind: string;
   start: number;
   end: number;
@@ -55,7 +55,7 @@ function blank(text: string, spans: readonly Span[]): string {
  * Each detector's spans arrive sorted and disjoint and are merged in one linear pass (inserting one at a time was
  * quadratic in the number of findings).
  */
-function collect(input: string, detectors: readonly Detector[]): Span[] {
+export function collect(input: string, detectors: readonly Detector[] = DETECTORS): Span[] {
   let taken: Span[] = [];
   let work = input;
   for (const d of detectors) {
@@ -93,40 +93,65 @@ function absorbEscape(input: string, s: Span, prevEnd: number): Span {
  * already in the input, so `restore(result.text, result.map)` returns the input exactly.
  */
 export function scrub(input: string, options: ScrubOptions = {}): ScrubResult {
-  const spans = collect(input, DETECTORS);
-  const taken = new Set(input.match(PLACEHOLDER));
-  const placeholderOf = new Map<string, string>();
-  const nextNumber = new Map<string, number>();
-  const map: ScrubMap = {};
-  for (const [placeholder, value] of Object.entries(options.map ?? {})) {
-    const kind = PLACEHOLDER_KIND.exec(placeholder)?.[1];
-    if (kind === undefined || typeof value !== 'string') throw new TypeError('scrub: options.map holds an entry that is not a placeholder and a string');
-    taken.add(placeholder);
-    placeholderOf.set(`${kind}\u0000${value}`, placeholder);
-    map[placeholder] = value;
-  }
+  const spans = collect(input);
+  const numbers = new Numbering(options.map);
+  numbers.reserve(input);
   const findings: Finding[] = [];
   let text = '';
   let last = 0;
 
   for (const { kind, start, end } of spans) {
-    const value = input.slice(start, end);
-    const key = `${kind}\u0000${value}`;
-    let placeholder = placeholderOf.get(key);
-    if (placeholder === undefined) {
-      let n = nextNumber.get(kind) ?? 1;
-      while (taken.has(`[${kind}_${n}]`)) n++;
-      nextNumber.set(kind, n + 1);
-      placeholder = `[${kind}_${n}]`;
-      placeholderOf.set(key, placeholder);
-      map[placeholder] = value;
-    }
+    const placeholder = numbers.assign(kind, input.slice(start, end));
     findings.push({ kind, placeholder, start, end });
     text += input.slice(last, start) + placeholder;
     last = end;
   }
   text += input.slice(last);
-  return { text, findings, map };
+  return { text, findings, map: numbers.map };
+}
+
+/**
+ * Placeholder assignment, shared by `scrub` and `StreamScrubber` so both number values the same way. Each distinct
+ * value of a kind gets the lowest number not taken by the earlier map or by placeholder-shaped text reserved so far.
+ */
+export class Numbering {
+  readonly map: ScrubMap = {};
+  /** Placeholders this instance assigned, as opposed to ones from the earlier map. */
+  readonly assigned = new Set<string>();
+  private readonly taken = new Set<string>();
+  private readonly placeholderOf = new Map<string, string>();
+  private readonly nextNumber = new Map<string, number>();
+
+  constructor(earlier: ScrubMap = {}) {
+    for (const [placeholder, value] of Object.entries(earlier)) {
+      const kind = PLACEHOLDER_KIND.exec(placeholder)?.[1];
+      if (kind === undefined || typeof value !== 'string') throw new TypeError('scrub: options.map holds an entry that is not a placeholder and a string');
+      this.taken.add(placeholder);
+      this.placeholderOf.set(`${kind}\u0000${value}`, placeholder);
+      this.map[placeholder] = value;
+    }
+  }
+
+  /** Keeps every placeholder-shaped text in `text` from being assigned to a value. */
+  reserve(text: string): void {
+    for (const p of text.match(PLACEHOLDER) ?? []) this.taken.add(p);
+  }
+
+  assign(kind: string, value: string): string {
+    const key = `${kind}\u0000${value}`;
+    let placeholder = this.placeholderOf.get(key);
+    if (placeholder === undefined) {
+      let n = this.nextNumber.get(kind) ?? 1;
+      while (this.taken.has(`[${kind}_${n}]`)) n++;
+      this.nextNumber.set(kind, n + 1);
+      placeholder = `[${kind}_${n}]`;
+      this.taken.add(placeholder);
+      this.placeholderOf.set(key, placeholder);
+      this.assigned.add(placeholder);
+      this.map[placeholder] = value;
+    }
+    return placeholder;
+  }
 }
 
 /** Puts the original values back. Placeholders that are not in the map are left as they are. */
