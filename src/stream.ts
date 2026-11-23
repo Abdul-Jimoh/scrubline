@@ -107,7 +107,7 @@ export class StreamScrubber {
     out += text.slice(last, cut);
     // The URL password detector needs the scheme, however long the user name before the password is. Found by Qodo
     // in the review of PR #22: a user name longer than the window left the password visible.
-    const url = openUrlStart(text, cut);
+    const url = openUrlStart(text, cut, spans);
     const keep = Math.max(0, cut - this.window);
     this.context = text.slice(url === -1 ? keep : Math.min(keep, url), cut);
     this.pending = text.slice(cut);

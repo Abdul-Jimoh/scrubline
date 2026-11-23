@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_WINDOW, MIN_WINDOW, restore, scrub, scrubStream, StreamScrubber, type StreamOptions } from '../src/index.js';
+import {
+  DEFAULT_WINDOW,
+  MIN_WINDOW,
+  restore,
+  scrub,
+  scrubStream,
+  StreamScrubber,
+  type StreamOptions,
+} from '../src/index.js';
 import { FAKE, j } from './fixtures.js';
 
 /** Pushes each chunk and returns everything written out, plus the map. */
@@ -85,6 +93,26 @@ describe('scrubbing a stream', () => {
     // With the default window and a 400 KiB user name, in 64 KiB chunks.
     const big = `postgres://${'u'.repeat(400 * 1024)}:${password}@db.internal/x\n`;
     expect(run(big.match(/[^]{1,65536}/g)!).text).toBe(scrub(big).text);
+  });
+
+  it('drops a URL from the context once it has ended, escaped line end included (Qodo, PR #22)', () => {
+    // After `\n` (two characters, as in JSON), the URL has ended; a long run after it must not stay in memory.
+    for (const end of ['\\n', '\\"', ' ', '"']) {
+      const x = `postgres://u:${j('S3cr3t', '!Pa55$', 'w0rd')}@db${end}${'a'.repeat(20000)}`;
+      const s = new StreamScrubber({ window: 64 });
+      let text = '';
+      let peak = 0;
+      for (const c of x.match(/[^]{1,16}/g)!) {
+        text += s.push(c);
+        peak = Math.max(peak, s.buffered);
+      }
+      expect(text + s.end()).toBe(scrub(x).text);
+      expect(peak, JSON.stringify(end)).toBeLessThan(1000);
+    }
+    // A key that took the backslash before it (`\npm_…`) does not end the user name.
+    const password = j('S3cr3t', '!Pa55$', 'w0rd');
+    const x = `${filler(100)}postgres://u\\${FAKE.NPM_TOKEN}${'u'.repeat(500)}:${password}@db.internal/x\n`;
+    expect(run(x.match(/[^]{1,16}/g)!, { window: 64 }).text).toBe(scrub(x).text);
   });
 
   it('keeps the order of text when a string arrives between the bytes of one character (Qodo, PR #22)', () => {
