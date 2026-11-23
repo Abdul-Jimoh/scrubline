@@ -111,8 +111,7 @@ A spelling the detector deliberately does not accept gets a comment saying so an
 **Why:** on PR #18 (issue #5, home-directory paths) the agent's property tests passed at 10,000 runs, and Qodo's
 review still found three leaks in spellings the generator never produced: `C:\uSeRs\jane`, `FILE:///Users/alice`
 and a name written as `\u006aane`. On PR #13 the verification agent found the same kind of leak in URL passwords
-(`\u00e9` and PHP's `\/`). A property test only finds leaks in the shapes its generator produces: with the mixed-case
-spellings added, the generator finds two of the three PR #18 leaks on the code from before the fix.
+(`\u00e9` and PHP's `\/`). A property test only finds leaks in the shapes its generator produces.
 
 ## Constraints
 
