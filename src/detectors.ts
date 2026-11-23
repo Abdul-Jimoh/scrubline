@@ -325,6 +325,43 @@ function alreadyMasked(opaque: readonly [number, number, boolean][], p: number):
   return false;
 }
 
+/**
+ * For `StreamScrubber`: the start of the scheme of the last URL before `end` whose authority may still be open at
+ * `end`, or -1. `findUrlPasswords` needs that scheme to find the password, however long the user name is, so a stream
+ * keeps the text from there. A URL ends where `scanAuthority` stops: a character in `URL_END`, or a backslash other
+ * than `\\`, `\/` and `\uXXXX` for a non-ASCII character. `claimed` (sorted, from earlier detectors) is scanned past,
+ * with a backslash right before it, as `scanAuthority` scans past `\0`. Found by Qodo in the review of PR #22: counting
+ * no backslash as an end kept everything after `http://u:p@h\n` until the next space.
+ */
+export function openUrlStart(
+  input: string,
+  end: number,
+  claimed: readonly { start: number; end: number }[] = [],
+): number {
+  const sep = Math.max(input.lastIndexOf('://', end - 3), input.lastIndexOf(':\\/\\/', end - 5));
+  if (sep <= 0 || !SCHEME_CHAR.test(input[sep - 1]!)) return -1;
+  let i = 0;
+  for (let k = sep + 1; k < end; k++) {
+    while (i < claimed.length && claimed[i]!.end <= k) i++;
+    const next = claimed[i];
+    const c = input.charCodeAt(k);
+    if (next && (next.start <= k || (c === 92 && next.start === k + 1))) {
+      k = next.end - 1;
+      continue;
+    }
+    if (c === 92) {
+      const d = input[k + 1];
+      HEX4.lastIndex = k + 2;
+      if (d === '\\' || d === '/') k++;
+      else if (d === 'u' && HEX4.test(input) && parseInt(input.slice(k + 2, k + 6), 16) >= 0x80) k += 5;
+      else return -1;
+    } else if (c < 128 && URL_END[c]) return -1;
+  }
+  let s = sep - 1;
+  while (s > 0 && SCHEME_CHAR.test(input[s - 1]!)) s--;
+  return s;
+}
+
 function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
   for (const m of input.matchAll(URL_SEPARATOR)) {
     if (m.index === 0 || !SCHEME_CHAR.test(input[m.index - 1]!)) continue;

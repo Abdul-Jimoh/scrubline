@@ -45,6 +45,26 @@ const answer = await askModel(text);
 console.log(restore(answer, map)); // placeholders in the model's answer become the originals again
 ```
 
+### A stream
+
+```ts
+import { scrubStream } from 'scrubline';
+
+const { text, map } = scrubStream(process.stdin); // any async iterable of strings or UTF-8 bytes
+for await (const part of text) process.stdout.write(part);
+// map is complete once the stream has been read
+```
+
+`scrubStream` masks a log tail or a large file without loading it whole. The output and map are the same as
+`scrub` of the whole text, with the two exceptions under Known limits. It holds back the last 128 KiB
+(`window` option) until no later character can change how that text is masked, and never cuts inside a match, so a
+private key block or a token split across chunks is masked as one value. Bytes are decoded as UTF-8, with a
+character split between chunks kept whole. `StreamScrubber` gives the same thing with `push(chunk)` and `end()`,
+each returning the text that is ready. The window is at least 64 characters. Memory is about three windows, plus any
+single match still open (and a URL still open, from its scheme), plus the map, which grows with the number of
+*distinct* values, not with the size of the input. Unlike `scrub`, it does not
+return findings.
+
 ### From a shell
 
 ```sh
@@ -100,7 +120,8 @@ the text, and a dot that ends a sentence is left out; in JSON, a letter written 
 it. The same name gets the same placeholder in every form of path. A Windows separator is kept outside the mask.
 
 Planned, not built yet, each an issue in the [backlog](https://github.com/Abdul-Jimoh/scrubline/issues): labelled
-secrets (`password=…`), phone and card numbers, IP addresses, high-entropy strings, custom rules and streaming.
+secrets (`password=…`), phone and card numbers, IP addresses, high-entropy strings and custom rules. The CLI does
+not stream yet: it reads its whole input.
 
 ## Known limits
 
@@ -153,6 +174,11 @@ secrets (`password=…`), phone and card numbers, IP addresses, high-entropy str
   `\` (`C:/Users\jane`), `/Users` in another case (`/users/jane`; on Windows paths any case is matched), slash-escaped JSON (`\/home\/jane`), and other home roots (`~`, `/root`,
   `C:\Documents and Settings\…`). A person whose user name is `shared`, `public` or `default` (in any case) is not
   masked, and a name that really ends in `.` keeps that dot visible.
+- Streams (`scrubStream`, `StreamScrubber`): placeholder-shaped text that arrives after this stream gave that
+  placeholder to a value is masked as `[PLACEHOLDER_n]`, so `restore` still gives the input back; `scrub` of the
+  whole text would have numbered the value around it instead. A value that is recognised only more than `window`
+  characters after it starts (an address or URL password longer than 128 KiB) can be written out before it is known,
+  so its start stays visible. A URL password after a user name of any length is masked.
 
 ## How it is tested
 
@@ -170,6 +196,8 @@ secrets (`password=…`), phone and card numbers, IP addresses, high-entropy str
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
 | Scan time stays linear: twenty-six crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; under 40 ms and 140–200 ms on an M-series laptop) |
 | A 12 MB key block with no END line is masked rather than throwing | `test/performance.test.ts`: "very large input" |
+| A stream cut at any points (mid-key, mid-escape, mid-character) gives the same text and map as `scrub` of the whole, restores exactly and loses every planted value; a key block arriving line by line and a token cut at every position are masked as one value; a URL password after a user name longer than the window; placeholder text cut by a chunk boundary; a string between the bytes of one character; the stream limits above | `test/properties.test.ts`: "a stream …"; `test/stream.test.ts` |
+| Stream memory stays within three windows plus a chunk on 64 MB with a fixed set of secrets. By hand: 1 GiB in 64 KiB chunks peaked at 120 MB resident with 3 map entries (Node 26, M-series laptop, 85 s) | `test/stream.test.ts`: "keeps memory bounded" |
 
 Every key in the tests is fake and is assembled at runtime, so the repository never holds a complete key-shaped string.
 
