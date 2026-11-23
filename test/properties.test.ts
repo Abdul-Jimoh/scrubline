@@ -96,12 +96,13 @@ const urlWithPassword = fc
 /**
  * A home-directory path, of which only the user name is masked. It brings its own neighbour in front: the document's
  * separators include `/`, and `x//home/jane` is not a home path (README "Known limits"). Names are 6 or more
- * characters so that random filler does not contain one by chance, and leave out the shared folder names.
+ * characters so that random filler does not contain one by chance, and leave out the shared folder names. Rule 6
+ * (AGENTS.md): the spellings include mixed case where Windows and URL schemes ignore it (`c:\uSeRs\`, `FILE://`).
  */
 const homePath = fc
   .tuple(
-    fc.constantFrom(' ', '\n', '(', '"', "'", '=', ':', '\\n', '\t', '\x1b[32m', '\\u001b[31m', '%20', '_', '-', '[', 'file://'),
-    fc.constantFrom('/Users/', '/home/', 'C:\\Users\\', 'd:\\users\\', 'C:\\\\Users\\\\', 'C:/Users/'),
+    fc.constantFrom(' ', '\n', '(', '"', "'", '=', ':', '\\n', '\t', '\x1b[32m', '\\u001b[31m', '%20', '_', '-', '[', 'file://', 'FILE://'),
+    fc.constantFrom('/Users/', '/home/', 'C:\\Users\\', 'd:\\users\\', 'C:\\\\Users\\\\', 'C:/Users/', 'c:\\uSeRs\\', 'C:\\USERS\\'),
     chars(LOW + UP + DIG + '._-', 6, 14).filter((n) => /[^.]$/.test(n) && !['shared', 'public', 'default'].includes(n.toLowerCase())),
     fc.constantFrom('', '/', '\\', ':', ' ', '"', "'", ')', '/projects/app/index.js:3:9', '\\app\\index.js', '\\\\x'),
   )

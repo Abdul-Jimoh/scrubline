@@ -92,6 +92,28 @@ A known gap goes under "Known limits" instead of being left out.
 **Why:** an independent check before the first push found README claims the tests did not support. People choose a
 security tool by its README.
 
+### 6. Every spelling a format accepts is tested
+
+**Applies to:** a detector whose target can be written more than one way, and its tests: its entry in the `planted`
+generator (`test/properties.test.ts`) and its cases in `test/scrub.test.ts`. Rule 4 says to add the format to the
+generator; this rule says which spellings to test, and where.
+
+**Do:** list the spellings the detector accepts, and test each one:
+- in the generator: mixed letter case (`c:\uSeRs\`, `FILE://`) wherever the system that reads the text ignores case,
+  such as Windows paths, URL schemes and host names;
+- in JSON-shaped inputs (a test in `test/scrub.test.ts`, or the JSON-encoded document property): JSON escapes inside
+  the value, meaning `\uXXXX` for any character, plain ASCII letters included (`\u006a`), and `\/`; and the value in a
+  JSON string inside another JSON string (doubled backslashes). Not in the raw-text generator: there, a JSON escape
+  is text that cannot occur (`C:\Users\` followed by `\u006a` is neither a real path nor valid JSON).
+
+A spelling the detector deliberately does not accept gets a comment saying so and a test that pins it (rule 1).
+
+**Why:** on PR #18 (issue #5, home-directory paths) the agent's property tests passed at 10,000 runs, and Qodo's
+review still found three leaks in spellings the generator never produced: `C:\uSeRs\jane`, `FILE:///Users/alice`
+and a name written as `\u006aane`. On PR #13 the verification agent found the same kind of leak in URL passwords
+(`\u00e9` and PHP's `\/`). A property test only finds leaks in the shapes its generator produces: with the mixed-case
+spellings added, the generator finds two of the three PR #18 leaks on the code from before the fix.
+
 ## Constraints
 
 - No runtime dependencies. Dev dependencies are pinned to exact versions.
