@@ -111,7 +111,8 @@ Keys are found at token boundaries: after whitespace, punctuation, `_` or quotes
 `\uXXXX`), a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code; and in Telegram's `…/bot<token>/…` URLs.
 A complete private key block (BEGIN to END) is masked whatever its armour lines hold. A scrubbed JSON document
 stays valid JSON: no mask starts inside an escape, and a mask that would start right after an escaping backslash
-(`\n` + `pm_…`) takes the backslash with it. One exception is under Known limits.
+(`\n` + `pm_…`) takes the backslash with it. An address whose `@` comes straight after an escape letter
+(`\r@a.co`) is masked from the letter, with the backslash. One exception is under Known limits.
 
 A home path is found only where a path starts: `/Users` or `/home` after whitespace, punctuation, a quote, an escape
 or `file://` (in any case), not inside another path (`/opt/home/x`, `foo/Users/x`); a drive letter not glued to a
@@ -136,6 +137,9 @@ not stream yet: it reads its whole input.
   are masked only from after the last `%` (from after `%XX` when the `%` is followed by two hex digits); one whose
   local part ends in `%XX` (`jane%3D@…`) is not masked at all.
 - URL-encoded addresses with no literal `@` (`?email=jane%40example.com`) are not detected.
+- In JSON, an escape letter right before an address-shaped `@…` is masked with it: `foo\n@bar.com` (a newline, then
+  `@bar.com`) becomes `foo[EMAIL_1]`, because `\n@bar.com` can also be read as text holding the address `n@bar.com`.
+  The line break is hidden until `restore`, which puts it back.
 - In plain text, a mask right after a lone backslash (`DOMAIN\jane@…`) includes the backslash, so that value gets
   its own placeholder, separate from the same address elsewhere, and `restore` puts the backslash back with it.
 - A URL password holding whitespace, a control character, `"` (also `\"` in JSON), `<`, `>`, `` ` ``, `{`, `}`, `|`

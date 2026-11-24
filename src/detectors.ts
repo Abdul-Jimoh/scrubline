@@ -147,12 +147,15 @@ function* findKeyBlocks(input: string): Iterable<readonly [number, number]> {
 // EMAIL guards its start with its whole local-part class, so a long run like `a.a.a.…` has one possible start
 // instead of one per `.`; otherwise each start rescans the run and the scan is quadratic.
 // An address may not start on the letter of an escape, so in `\njane@…` it starts at `j`, not at the `n` (after
-// other characters, `DOMAIN\jane@…`, it starts right after the backslash). The local part leaves out `%`
+// other characters, `DOMAIN\jane@…`, it starts right after the backslash). Unless the `@` comes straight after the
+// escape letter (`\r@a.co`): read as an escape, the address would have no local part and stay visible, so there it
+// starts on the letter and takes the backslash (issue #21, found by the test generator). Not after `\uXXXX`, which is
+// always an escape: `\u0001@b.co` is a control character and `@b.co`. The local part leaves out `%`
 // (obsolete in addresses): with it, a URL-encoded run like `…%3D…%3D…@` was one long local part that every start
 // inside it rescanned. A start right after `%` is allowed unless the `%` begins a URL-encoded byte (`%3D`).
 const EMAIL_BODY = `[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}${end(ALNUM)}`;
 const EMAIL = new RegExp(
-  `${start('A-Za-z0-9._+-')}(?<!\\\\(?=[nrtfbv]|u[0-9A-Fa-f]{4}))(?<!%(?=[0-9A-Fa-f]{2}))${EMAIL_BODY}`,
+  `${start('A-Za-z0-9._+-')}(?<!\\\\(?=[nrtfbv](?!@)|u[0-9A-Fa-f]{4}))(?<!%(?=[0-9A-Fa-f]{2}))${EMAIL_BODY}`,
   'g',
 );
 /**
@@ -164,11 +167,16 @@ const EMAIL_NEXT = new RegExp(`[._+-]+(?=[A-Za-z0-9])(${EMAIL_BODY})`, 'y');
 const SSH_REMOTE = /^git@/i;
 
 function* findEmails(input: string): Iterable<readonly [number, number]> {
+  let prevEnd = 0;
   for (EMAIL.lastIndex = 0; ; ) {
     const m = EMAIL.exec(input);
     if (!m) return;
     let s = m.index;
     let e = s + m[0].length;
+    // An address that starts on an escape letter (`\r@a.co`, issue #21) takes the whole run of backslashes before it.
+    // One backslash is not enough in JSON inside JSON: `\\r` there is the inner `\r`, and keeping half of it left the
+    // inner string ending in `\[EMAIL_1]`, an invalid escape (found by Qodo's local review of the change).
+    if (input[s - 1] === '\\' && input[s + 1] === '@') while (s > prevEnd && input[s - 1] === '\\') s--;
     // Tried only right after a match, so each try starts at a new place and the scan stays linear.
     for (;;) {
       if (!SSH_REMOTE.test(input.slice(s, e))) yield [s, e];
@@ -179,6 +187,7 @@ function* findEmails(input: string): Iterable<readonly [number, number]> {
       s = e + n[0].length - n[1]!.length;
       e += n[0].length;
     }
+    prevEnd = e;
     EMAIL.lastIndex = e;
   }
 }

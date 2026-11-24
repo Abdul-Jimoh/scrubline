@@ -117,6 +117,39 @@ describe('token boundaries', () => {
     expect(map['[EMAIL_1]']).toBe(`\\${FAKE.EMAIL}`);
   });
 
+  it('masks a one-letter address after a backslash when the letter could end an escape (issue #21)', () => {
+    // Read as an escape, `\r@a.aa` has no local part; read as text, `r@a.aa` is an address. It is masked with the
+    // backslash, so no address is left visible and JSON stays valid.
+    for (const letter of ['n', 'r', 't', 'f', 'b', 'v']) {
+      const x = `log \\${letter}@a.aa end`;
+      const { text, map } = scrub(x);
+      expect(text).toBe('log [EMAIL_1] end');
+      expect(restore(text, map)).toBe(x);
+    }
+    // Known limit (over-masking): in JSON, a newline right before an address-shaped `@…` is masked with it.
+    const newline = JSON.stringify({ m: 'foo\n@bar.com' });
+    expect(scrub(newline).text).toBe('{"m":"foo[EMAIL_1]"}');
+    expect(restore(scrub(newline).text, scrub(newline).map)).toBe(newline);
+    // A longer local part still starts after the escape letter, as before.
+    expect(scrub(`\\n${FAKE.EMAIL}`).text).toBe('\\n[EMAIL_1]');
+    // In JSON (`\r` as an escape, and as an escaped backslash and `r`), and in JSON inside JSON: every layer still
+    // parses and reads `x[EMAIL_1]`.
+    const inner = (m: string) => JSON.stringify({ m });
+    const cases = [
+      { json: '{"m":"x\\r@a.aa"}', layers: 1 },
+      { json: inner('x\\r@a.aa'), layers: 1 },
+      { json: inner('{"m":"x\\r@a.aa"}'), layers: 2 },
+      { json: inner(inner('x\\r@a.aa')), layers: 2 },
+    ];
+    for (const { json, layers } of cases) {
+      const { text, map } = scrub(json);
+      let value: string = JSON.parse(text).m;
+      if (layers === 2) value = JSON.parse(value).m;
+      expect(value, json).toBe('x[EMAIL_1]');
+      expect(restore(text, map)).toBe(json);
+    }
+  });
+
   it('masks an address right after a % that does not start a URL-encoded byte', () => {
     expect(scrub(`a%${FAKE.EMAIL}`).text).toBe('a%[EMAIL_1]');
     expect(scrub(`x %${FAKE.EMAIL}`).text).toBe('x %[EMAIL_1]');
