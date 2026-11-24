@@ -36,7 +36,9 @@ function regexDetector(kind: string, pattern: RegExp, accept?: (match: string) =
  * a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code (`ESC[32m`, also written `\u001b[32m`). Logs put keys
  * right after these. Evaluated just after that character.
  */
-const ENDS_ESCAPE = String.raw`(?<!\\[nrtfbv])(?<!\\u[0-9A-Fa-f]{4})(?<!%[0-9A-Fa-f]{2})(?<!(?:\x1b|\\u001b|\\x1b|\\033|\\e)\[[0-9;]*m)`;
+const escapeEnds = (unicodeHex: string) =>
+  String.raw`(?<!\\[nrtfbv])(?<!\\u${unicodeHex})(?<!%[0-9A-Fa-f]{2})(?<!(?:\x1b|\\u001b|\\x1b|\\033|\\e)\[[0-9;]*m)`;
+const ENDS_ESCAPE = escapeEnds('[0-9A-Fa-f]{4}');
 
 /**
  * Where a token may start: not right after a character of `inToken`, unless that character ends an escape. `\b` is
@@ -153,9 +155,15 @@ function* findKeyBlocks(input: string): Iterable<readonly [number, number]> {
 // always an escape: `\u0001@b.co` is a control character and `@b.co`. The local part leaves out `%`
 // (obsolete in addresses): with it, a URL-encoded run like `…%3D…%3D…@` was one long local part that every start
 // inside it rescanned. A start right after `%` is allowed unless the `%` begins a URL-encoded byte (`%3D`).
-const EMAIL_BODY = `[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}${end(ALNUM)}`;
+// In JSON, a local part may hold `\uXXXX` for one of its own characters (`x\u0072@a.co` is `xr@a.co`; found by Qodo
+// in the review of PR #23). Such an escape continues the address it is in rather than starting a new one, so a run of
+// them has one possible start too; another `\uXXXX` (`\u00e9`, `\u0001`) still ends an escape, as for tokens.
+const LOCAL_HEX = '00(?:2[BbDdEe]|3[0-9]|4[1-9A-Fa-f]|5[0-9AaFf]|6[1-9A-Fa-f]|7[0-9Aa])';
+const EMAIL_LOCAL = `(?:[A-Za-z0-9._+-]|\\\\u${LOCAL_HEX})+`;
+const EMAIL_START = `(?<![A-Za-z0-9._+-]${escapeEnds(`(?!${LOCAL_HEX})[0-9A-Fa-f]{4}`)})`;
+const EMAIL_BODY = `${EMAIL_LOCAL}@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}${end(ALNUM)}`;
 const EMAIL = new RegExp(
-  `${start('A-Za-z0-9._+-')}(?<!\\\\(?=[nrtfbv](?!@)|u[0-9A-Fa-f]{4}))(?<!%(?=[0-9A-Fa-f]{2}))${EMAIL_BODY}`,
+  `${EMAIL_START}(?<!\\\\(?=[nrtfbv](?!@)|u[0-9A-Fa-f]{4}))(?<!%(?=[0-9A-Fa-f]{2}))${EMAIL_BODY}`,
   'g',
 );
 /**
@@ -164,10 +172,10 @@ const EMAIL = new RegExp(
  */
 const EMAIL_NEXT = new RegExp(`[._+-]+(?=[A-Za-z0-9])(${EMAIL_BODY})`, 'y');
 /**
- * The most backslashes an address that starts on an escape letter takes with it, and the most counted before any other
- * match to decide whether it takes one. Half of a stream's smallest window, so a stream decides as `scrub` does.
+ * The most backslashes an address that starts on an escape (`\r@`, `\u0072@`) takes with it: half of a stream's
+ * smallest window, so a stream has not yet written them out when the address is found.
  */
-export const MAX_ESCAPE_RUN = 32;
+const MAX_ESCAPE_RUN = 32;
 /** `git@github.com:org/repo` is an SSH remote, not a person. */
 const SSH_REMOTE = /^git@/i;
 
@@ -184,7 +192,9 @@ function* findEmails(input: string): Iterable<readonly [number, number]> {
     // At most `MAX_ESCAPE_RUN` of them: a stream writes text out once `window` (at least 64) characters follow it, so a
     // longer run could already be written when `r@` arrives, and the address would be left visible (found by Qodo in
     // the review of PR #23). 32 covers JSON six layers deep; deeper, the innermost layer may not parse.
-    if (input[s - 1] === '\\' && input[s + 1] === '@') {
+    // An address that starts with a `\uXXXX` escape (`r@a.co`) does the same, for the same reason (found by Qodo's
+    // local review of that change, three layers deep).
+    if ((input[s - 1] === '\\' && input[s + 1] === '@') || input[s] === '\\') {
       const stop = Math.max(prevEnd, s - MAX_ESCAPE_RUN);
       while (s > stop && input[s - 1] === '\\') s--;
     }

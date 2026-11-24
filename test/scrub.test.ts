@@ -160,6 +160,52 @@ describe('token boundaries', () => {
     expect(restore(scrub(longRun).text, scrub(longRun).map)).toBe(longRun);
   });
 
+  it('keeps JSON valid when a token follows an escape after a long run of escaped backslashes (Qodo, PR #23)', () => {
+    // `\\` pairs, then `\n` and `pm_…`: the token's `n` ends the escape, so the mask must take that backslash however
+    // long the run before it.
+    for (let pairs = 0; pairs <= 40; pairs++) {
+      const json = JSON.stringify({ m: `${'\\'.repeat(pairs)}\n${FAKE.NPM_TOKEN.slice(1)}` });
+      const { text, map } = scrub(json);
+      expect(JSON.parse(text).m, `${pairs} pairs`).toBe(`${'\\'.repeat(pairs)}[NPM_TOKEN_1]`);
+      expect(restore(text, map)).toBe(json);
+    }
+  });
+
+  it('masks an address whose local part has \\uXXXX escapes for its own characters, in JSON (Qodo, PR #23)', () => {
+    const inner = (m: string) => JSON.stringify({ m });
+    // Decoded, each of these is an address: `xr@a.aa`, `jane@a.aa`, `a._b@a.aa`.
+    for (const json of [
+      '{"m":"x\\u0072@a.aa"}',
+      '{"m":"\\u006aane@a.aa"}',
+      '{"m":"j\\u0061ne@a.aa"}',
+      '{"m":"\\u006A\\u0061\\u006e\\u0065@a.aa"}',
+      '{"m":"a\\u002e\\u005fb@a.aa"}',
+    ]) {
+      const { text, map } = scrub(json);
+      expect(JSON.parse(text).m, json).toBe('[EMAIL_1]');
+      expect(restore(text, map)).toBe(json);
+    }
+    // JSON inside JSON, up to six layers: every layer parses (the third layer did not, found by Qodo's local review).
+    // Known limit: from the second layer, local-part characters before the first escape stay visible (`x` of `xr@a.aa`).
+    for (const [json, nested] of [
+      ['{"m":"x\\u0072@a.aa"}', 'x[EMAIL_1]'],
+      ['{"m":"\\u0072@a.aa"}', '[EMAIL_1]'],
+    ]) {
+      let deep = json!;
+      for (let layers = 1; layers <= 6; layers++, deep = inner(deep)) {
+        let value = scrub(deep).text;
+        for (let i = 0; i < layers; i++) value = JSON.parse(value).m;
+        expect(value, `${json}, ${layers} layers`).toBe(layers === 1 ? '[EMAIL_1]' : nested);
+        expect(restore(scrub(deep).text, scrub(deep).map)).toBe(deep);
+      }
+    }
+    // Other `\\uXXXX` escapes still end before the address, as for tokens: a letter outside the local part, a control
+    // character (nothing to mask), and `@` itself.
+    expect(scrub('{"m":"\\u00e9jane@a.aa"}').text).toBe('{"m":"\\u00e9[EMAIL_1]"}');
+    expect(scrub('{"m":"\\u0001@b.co"}').text).toBe('{"m":"\\u0001@b.co"}');
+    expect(scrub('{"m":"\\u0040a.aa"}').text).toBe('{"m":"\\u0040a.aa"}');
+  });
+
   it('masks an address right after a % that does not start a URL-encoded byte', () => {
     expect(scrub(`a%${FAKE.EMAIL}`).text).toBe('a%[EMAIL_1]');
     expect(scrub(`x %${FAKE.EMAIL}`).text).toBe('x %[EMAIL_1]');

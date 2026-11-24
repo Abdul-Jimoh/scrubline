@@ -97,8 +97,8 @@ describe('scrubbing a stream', () => {
 
   it('masks a one-letter address after a backslash run longer than the window (Qodo, PR #23)', () => {
     // The address takes at most 32 backslashes, so its start is never written out before `r@` arrives.
-    for (const n of [1, 31, 32, 33, 63, 64, 68, 200, 1000]) {
-      const x = `${filler(100)}${'\\'.repeat(n)}r@a.aa end\n${filler(100)}`;
+    for (const n of [1, 31, 32, 33, 63, 64, 68, 200, 1000]) for (const address of ['r@a.aa', '\\u0072@a.aa']) {
+      const x = `${filler(100)}${'\\'.repeat(n)}${address} end\n${filler(100)}`;
       for (const size of [1, 7, 16, 64]) {
         const { text, map } = run(x.match(new RegExp(`[^]{1,${size}}`, 'g'))!, { window: 64 });
         expect(text, `${n} backslashes, chunks of ${size}`).toBe(scrub(x).text);
@@ -106,7 +106,7 @@ describe('scrubbing a stream', () => {
         expect(restore(text, map)).toBe(x);
       }
     }
-    // Whether a token takes the backslash before it is decided from at most 32 of them, which a stream still holds.
+    // Whether a token takes the backslash before it depends on the whole run; the context keeps its parity.
     for (let n = 30; n < 140; n++) {
       const x = `${filler(100)}${'\\'.repeat(n)}${FAKE.NPM_TOKEN} end\n${filler(100)}`;
       expect(run(x.match(/[^]{1,7}/g)!, { window: 64 }).text, `${n} backslashes`).toBe(scrub(x).text);

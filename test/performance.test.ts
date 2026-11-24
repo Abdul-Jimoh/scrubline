@@ -33,6 +33,10 @@ const adversarial: [string, string][] = [
   ['escape-letter addresses back to back', '\\r@a.aa'.repeat(N / 7)],
   ['one long backslash run before an escape-letter address', '\\'.repeat(N) + 'r@a.aa'],
   ['backslash runs between escape-letter addresses', ('\\'.repeat(50) + 'r@a.aa').repeat(N / 56)],
+  // `\uXXXX` for a local-part character continues an address rather than starting one (Qodo, PR #23).
+  ['escaped local-part letters with no @', '\\u006a'.repeat(N / 6)],
+  ['escaped local-part letters, then an @ with no domain', ('\\u006a'.repeat(20) + '@').repeat(N / 121)],
+  ['escaped letters between other escapes', ('\\u0001\\u006a.').repeat(N / 13)],
   ['URL separators escaped for JSON, back to back', 'a:\\/\\/b:@'.repeat(N / 10)],
   ['an authority full of placeholder-like brackets that never close', 'a://u:' + '[A_1_1_1'.repeat(N / 8) + '@h'],
   // A password may hold a raw /, ? or #, so these scans read on past the path; each must stop at the next ://.
