@@ -140,6 +140,9 @@ not stream yet: it reads its whole input.
 - In JSON, an escape letter right before an address-shaped `@…` is masked with it: `foo\n@bar.com` (a newline, then
   `@bar.com`) becomes `foo[EMAIL_1]`, because `\n@bar.com` can also be read as text holding the address `n@bar.com`.
   The line break is hidden until `restore`, which puts it back.
+- Only the last 32 backslashes before a match are read, so a stream decides as `scrub` does. An address after an escape
+  letter in JSON nested up to six layers leaves every layer valid; deeper, the innermost layer may not parse. Nothing is left unmasked, and
+  `restore` is exact.
 - In plain text, a mask right after a lone backslash (`DOMAIN\jane@…`) includes the backslash, so that value gets
   its own placeholder, separate from the same address elsewhere, and `restore` puts the backslash back with it.
 - A URL password holding whitespace, a control character, `"` (also `\"` in JSON), `<`, `>`, `` ` ``, `{`, `}`, `|`

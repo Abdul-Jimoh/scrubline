@@ -148,6 +148,16 @@ describe('token boundaries', () => {
       expect(value, json).toBe('x[EMAIL_1]');
       expect(restore(text, map)).toBe(json);
     }
+    // At most 32 backslashes go with it, so a stream never writes the start out early (Qodo, PR #23). That is JSON six
+    // layers deep, and every layer still parses.
+    let deep = '{"m":"x\\r@a.aa"}';
+    for (let i = 1; i < 6; i++) deep = inner(deep);
+    let value = scrub(deep).text;
+    for (let i = 0; i < 6; i++) value = JSON.parse(value).m;
+    expect(value).toBe('x[EMAIL_1]');
+    const longRun = `${'\\'.repeat(40)}r@a.aa`;
+    expect(scrub(longRun).text).toBe(`${'\\'.repeat(8)}[EMAIL_1]`);
+    expect(restore(scrub(longRun).text, scrub(longRun).map)).toBe(longRun);
   });
 
   it('masks an address right after a % that does not start a URL-encoded byte', () => {

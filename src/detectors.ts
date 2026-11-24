@@ -163,6 +163,11 @@ const EMAIL = new RegExp(
  * block. The joining characters stay outside the mask, so the address gets the same placeholder as anywhere else.
  */
 const EMAIL_NEXT = new RegExp(`[._+-]+(?=[A-Za-z0-9])(${EMAIL_BODY})`, 'y');
+/**
+ * The most backslashes an address that starts on an escape letter takes with it, and the most counted before any other
+ * match to decide whether it takes one. Half of a stream's smallest window, so a stream decides as `scrub` does.
+ */
+export const MAX_ESCAPE_RUN = 32;
 /** `git@github.com:org/repo` is an SSH remote, not a person. */
 const SSH_REMOTE = /^git@/i;
 
@@ -176,7 +181,13 @@ function* findEmails(input: string): Iterable<readonly [number, number]> {
     // An address that starts on an escape letter (`\r@a.co`, issue #21) takes the whole run of backslashes before it.
     // One backslash is not enough in JSON inside JSON: `\\r` there is the inner `\r`, and keeping half of it left the
     // inner string ending in `\[EMAIL_1]`, an invalid escape (found by Qodo's local review of the change).
-    if (input[s - 1] === '\\' && input[s + 1] === '@') while (s > prevEnd && input[s - 1] === '\\') s--;
+    // At most `MAX_ESCAPE_RUN` of them: a stream writes text out once `window` (at least 64) characters follow it, so a
+    // longer run could already be written when `r@` arrives, and the address would be left visible (found by Qodo in
+    // the review of PR #23). 32 covers JSON six layers deep; deeper, the innermost layer may not parse.
+    if (input[s - 1] === '\\' && input[s + 1] === '@') {
+      const stop = Math.max(prevEnd, s - MAX_ESCAPE_RUN);
+      while (s > stop && input[s - 1] === '\\') s--;
+    }
     // Tried only right after a match, so each try starts at a new place and the scan stays linear.
     for (;;) {
       if (!SSH_REMOTE.test(input.slice(s, e))) yield [s, e];

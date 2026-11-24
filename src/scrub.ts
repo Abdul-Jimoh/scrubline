@@ -1,4 +1,4 @@
-import { DETECTORS, type Detector } from './detectors.js';
+import { DETECTORS, MAX_ESCAPE_RUN, type Detector } from './detectors.js';
 
 /** Where a value was found in the input. The value itself is only in the map, so findings are safe to log. */
 export interface Finding {
@@ -82,8 +82,10 @@ export function collect(input: string, detectors: readonly Detector[] = DETECTOR
  * breaks JSON. Masking one character more keeps the text valid and still restores exactly.
  */
 function absorbEscape(input: string, s: Span, prevEnd: number): Span {
+  // At most `MAX_ESCAPE_RUN` backslashes are counted, so the answer depends only on text a stream still holds; a
+  // longer run counted whole gave a stream a different answer from `scrub` (found while fixing Qodo's review of PR #23).
   let n = 0;
-  while (s.start - n - 1 >= prevEnd && input.charCodeAt(s.start - n - 1) === 92) n++;
+  while (n < MAX_ESCAPE_RUN && s.start - n - 1 >= prevEnd && input.charCodeAt(s.start - n - 1) === 92) n++;
   return n % 2 === 1 ? { ...s, start: s.start - 1 } : s;
 }
 

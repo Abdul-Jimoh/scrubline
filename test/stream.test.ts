@@ -95,6 +95,24 @@ describe('scrubbing a stream', () => {
     expect(run(big.match(/[^]{1,65536}/g)!).text).toBe(scrub(big).text);
   });
 
+  it('masks a one-letter address after a backslash run longer than the window (Qodo, PR #23)', () => {
+    // The address takes at most 32 backslashes, so its start is never written out before `r@` arrives.
+    for (const n of [1, 31, 32, 33, 63, 64, 68, 200, 1000]) {
+      const x = `${filler(100)}${'\\'.repeat(n)}r@a.aa end\n${filler(100)}`;
+      for (const size of [1, 7, 16, 64]) {
+        const { text, map } = run(x.match(new RegExp(`[^]{1,${size}}`, 'g'))!, { window: 64 });
+        expect(text, `${n} backslashes, chunks of ${size}`).toBe(scrub(x).text);
+        expect(text).not.toContain('@a.aa');
+        expect(restore(text, map)).toBe(x);
+      }
+    }
+    // Whether a token takes the backslash before it is decided from at most 32 of them, which a stream still holds.
+    for (let n = 30; n < 140; n++) {
+      const x = `${filler(100)}${'\\'.repeat(n)}${FAKE.NPM_TOKEN} end\n${filler(100)}`;
+      expect(run(x.match(/[^]{1,7}/g)!, { window: 64 }).text, `${n} backslashes`).toBe(scrub(x).text);
+    }
+  });
+
   it('drops a URL from the context once it has ended, escaped line end included (Qodo, PR #22)', () => {
     // After `\n` (two characters, as in JSON), the URL has ended; a long run after it must not stay in memory.
     for (const end of ['\\n', '\\"', ' ', '"']) {
