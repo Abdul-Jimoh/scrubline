@@ -308,12 +308,15 @@ while :; do
   write_pr_body
   gh pr edit "$PR_URL" --body-file "$RUN_DIR/pr-body.md" >/dev/null || needs_help "could not update the PR description"
 done
-# Low findings from every round, fixed or not (AGENTS.md quality gate), each with its status in the latest review that
-# has it. Titles are Qodo's text, scrubbed like everything else posted.
-low_list=$(jq -rs '[.[] | (.findings // [])[] | select(.action_level == "informational")]
-    | group_by(.id) | map(last)[]
-    | "- \(.title) (`\(.location.file_path // "?"):\(.location.start_line // "?")`, \(.attribution_status))"' \
-    "$RUN_DIR"/review-*.json | scrubbed)
+# Low findings from every round, fixed or not (AGENTS.md quality gate). Rounds are read in order (a glob would put
+# round 10 before round 2), and each finding shows its latest record, even if a later review gave it another level.
+# Titles are Qodo's text, scrubbed like everything else posted.
+reviews=()
+for ((r = 0; r <= ROUND; r++)); do reviews+=("$RUN_DIR/review-$r.json"); done
+low_list=$(jq -rs '[to_entries[] | .key as $round | (.value.findings // [])[] | . + {round: $round}]
+    | group_by(.id) | map(select(any(.action_level == "informational")) | max_by(.round))[]
+    | "- \(.title) (`\(.location.file_path // "?"):\(.location.start_line // "?")`, \(.action_level), \(.attribution_status))"' \
+    "${reviews[@]}" | scrubbed)
 [ -n "$low_list" ] || low_list="None."
 
 # --- Hand over -------------------------------------------------------------------------------------------------
