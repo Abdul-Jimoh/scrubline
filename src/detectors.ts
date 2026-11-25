@@ -158,7 +158,9 @@ function* findKeyBlocks(input: string): Iterable<readonly [number, number]> {
 // In JSON, a local part may hold `\uXXXX` for one of its own characters (`x\u0072@a.co` is `xr@a.co`; found by Qodo
 // in the review of PR #23). Such an escape continues the address it is in rather than starting a new one, so a run of
 // them has one possible start too; another `\uXXXX` (`\u00e9`, `\u0001`) still ends an escape, as for tokens.
-const LOCAL_HEX = '00(?:2[BbDdEe]|3[0-9]|4[1-9A-Fa-f]|5[0-9AaFf]|6[1-9A-Fa-f]|7[0-9Aa])';
+/** The hex of `\uXXXX` for an ASCII letter or digit, and for any character of a local part. */
+const ALNUM_HEX = '00(?:3[0-9]|4[1-9A-Fa-f]|5[0-9Aa]|6[1-9A-Fa-f]|7[0-9Aa])';
+const LOCAL_HEX = `(?:${ALNUM_HEX}|00(?:2[BbDdEe]|5[Ff]))`;
 const EMAIL_LOCAL = `(?:[A-Za-z0-9._+-]|\\\\u${LOCAL_HEX})+`;
 const EMAIL_START = `(?<![A-Za-z0-9._+-]${escapeEnds(`(?!${LOCAL_HEX})[0-9A-Fa-f]{4}`)})`;
 const EMAIL_BODY = `${EMAIL_LOCAL}@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}${end(ALNUM)}`;
@@ -170,7 +172,7 @@ const EMAIL = new RegExp(
  * An address joined to the previous one by `.`, `_`, `+` or `-` (`jane@x.com_bob@y.com`), which the start guard would
  * block. The joining characters stay outside the mask, so the address gets the same placeholder as anywhere else.
  */
-const EMAIL_NEXT = new RegExp(`[._+-]+(?=[A-Za-z0-9])(${EMAIL_BODY})`, 'y');
+const EMAIL_NEXT = new RegExp(`[._+-]+(?=[A-Za-z0-9]|\\\\u${ALNUM_HEX})(${EMAIL_BODY})`, 'y');
 /**
  * The most backslashes an address that starts on an escape (`\r@`, `\u0072@`) takes with it: half of a stream's
  * smallest window, so a stream has not yet written them out when the address is found.

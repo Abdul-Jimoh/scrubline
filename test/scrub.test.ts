@@ -199,6 +199,9 @@ describe('token boundaries', () => {
         expect(restore(scrub(deep).text, scrub(deep).map)).toBe(deep);
       }
     }
+    // Joined to the address before it, after `.`, `_`, `+` or `-` (Qodo, PR #23).
+    expect(scrub('{"m":"a@b.co_\\u006aane@a.aa"}').text).toBe('{"m":"[EMAIL_1]_[EMAIL_2]"}');
+    expect(scrub('{"m":"a@b.co.\\u0072@a.aa"}').text).toBe('{"m":"[EMAIL_1].[EMAIL_2]"}');
     // Other `\\uXXXX` escapes still end before the address, as for tokens: a letter outside the local part, a control
     // character (nothing to mask), and `@` itself.
     expect(scrub('{"m":"\\u00e9jane@a.aa"}').text).toBe('{"m":"\\u00e9[EMAIL_1]"}');
