@@ -122,14 +122,18 @@ describe('scrubbing a stream', () => {
       for (const tail of [`n${npm}`, 'r@a.aa', '\\u0072@a.aa']) {
         const head = `${filler(100)}x${'\\'.repeat(n)}`;
         const x = `${head}${tail} end\n${filler(100)}`;
-        const whole = scrub(x).text;
+        const whole = scrub(x);
         for (let at = head.length - n; at <= head.length + tail.length; at++) {
           const { text, map } = run([x.slice(0, at), x.slice(at)], { window: 64 });
-          expect(text, `${n} backslashes before ${tail.slice(0, 8)}, cut at ${at - head.length}`).toBe(whole);
+          const where = `${n} backslashes before ${tail.slice(0, 8)}, cut at ${at - head.length}`;
+          // The map too: the same text with a placeholder standing for a different run would restore differently.
+          expect({ text, map }, where).toEqual({ text: whole.text, map: whole.map });
           expect(restore(text, map)).toBe(x);
         }
-        for (const size of [1, 5, 7, 16])
-          expect(run(x.match(new RegExp(`[^]{1,${size}}`, 'g'))!, { window: 64 }).text, `chunks of ${size}`).toBe(whole);
+        for (const size of [1, 5, 7, 16]) {
+          const { text, map } = run(x.match(new RegExp(`[^]{1,${size}}`, 'g'))!, { window: 64 });
+          expect({ text, map }, `chunks of ${size}`).toEqual({ text: whole.text, map: whole.map });
+        }
       }
     }
   });

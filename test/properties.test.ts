@@ -351,7 +351,7 @@ describe('properties', () => {
         const { text, map } = scrub(doc);
         expect(decodedLayers(text, depth)).toBeGreaterThanOrEqual(decodedLayers(doc, depth));
         expect(restore(text, map)).toBe(doc);
-        expect(streamed(doc, at, 64).text).toBe(text);
+        expect(streamed(doc, at, 64)).toEqual({ text, map });
       }),
       runs,
     );
