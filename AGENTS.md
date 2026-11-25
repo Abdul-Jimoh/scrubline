@@ -26,7 +26,7 @@ untrusted. A missed secret is a leak that cannot be taken back.
 
 ## Setup and checks
 
-Node.js 20 or later.
+Node.js 22.12 or later.
 
 ```sh
 npm ci            # install exact pinned dev dependencies (TypeScript, Vitest, fast-check, @types/node)
@@ -35,6 +35,8 @@ npm run build     # emit dist/ (only needed to try the package by hand)
 ```
 
 A change is not done until `npm run check` passes. A bug fix comes with a test that fails on the code before the fix.
+CI (`.github/workflows/check.yml`) runs the same `npm ci` and `npm run check` on Node.js 22.12, 22 and 24 for every pull
+request to `main` and every push to it, and `main` requires that check to pass before a merge.
 
 ## Project rules
 
