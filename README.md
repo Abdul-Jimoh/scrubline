@@ -20,7 +20,7 @@ The originals stay in a local map, so you can put them back into an AI's answer 
 
 ## Try it
 
-Requires Node.js 20 or later.
+Requires Node.js 22.12 or later.
 
 ```sh
 git clone https://github.com/Abdul-Jimoh/scrubline.git
@@ -196,7 +196,8 @@ not stream yet: it reads its whole input.
 
 ## How it is tested
 
-`npm run check` runs the typecheck and all tests.
+`npm run check` runs the typecheck and all tests. CI runs it on Node.js 22.12, 22 and 24 for every pull request and
+every push to `main` (`.github/workflows/check.yml`), and a pull request cannot be merged until it passes.
 
 | Claim | Proof |
 |---|---|
