@@ -7,9 +7,10 @@
 #   2. runs Claude Code headless on the ticket with AGENTS.md (factory/prompts/implement.md);
 #   3. runs `npm run check` itself, and gives the agent the failure up to MAX_ATTEMPTS times;
 #   4. pushes the branch and opens a PR with the ticket link and acceptance criteria;
-#   5. waits for Qodo's review of the exact head commit, and if findings are open, gives them to the agent
-#      (factory/prompts/fix-review.md), checks again (with the same MAX_ATTEMPTS retries) and pushes, up to
-#      MAX_REVIEW_ROUNDS times;
+#   5. waits for Qodo's review of the exact head commit, and if High or Medium findings are open (the quality gate in
+#      AGENTS.md), gives them to the agent (factory/prompts/fix-review.md), checks again (with the same MAX_ATTEMPTS
+#      retries) and pushes, up to MAX_REVIEW_ROUNDS times, stopping early if a finding survives a fix; Low findings
+#      are listed for the human when it hands over;
 #   6. stops with label `agent-needs-help` and a comment on the issue whenever a limit is hit or something fails.
 # It never merges: the human does. Text the agent wrote is scrubbed with Scrubline before it is posted.
 # One installation per repository: the lock is local, so two machines running this could claim the same ticket.
@@ -78,6 +79,9 @@ needs_help() {
   log "STOP: $1"
   local detail="" where
   [ -s "$RUN_DIR/blocker.md" ] && detail=$'\n\n**What the agent wrote:**\n\n'"$(head -c 3000 "$RUN_DIR/blocker.md" | scrubbed)"
+  # In a review round, what the agent did with each finding (fixed, or disputed with evidence; AGENTS.md quality gate).
+  [ "${ROUND:-0}" -gt 0 ] && [ -s "$RUN_DIR/report.md" ] &&
+    detail+=$'\n\n**The agent\'s report:**\n\n'"$(tail -c 3000 "$RUN_DIR/report.md" | scrubbed)"
   if [ "$PUSHED" = yes ]; then where="Branch \`$BRANCH\`${PR_URL:+, PR $PR_URL}."
   else where="Nothing was pushed; the local work stays in the runner's worktree until the next run starts the ticket over."; fi
   comment "The scheduled agent stopped and needs a human: **$1**${detail}
@@ -244,17 +248,24 @@ IMPLEMENT_ATTEMPTS=$ATTEMPT
 
 # --- Open the PR (or reuse the one a stopped run left) ---------------------------------------------------------
 push || needs_help "git push failed"
-{
-  echo "Ticket: $ISSUE_URL (closes #$ISSUE)"
-  echo
-  echo "Opened by the scheduled agent (\`factory/agent-runner.sh\`, run \`$RUN_ID\`). \`npm run check\` passed on attempt $IMPLEMENT_ATTEMPTS of $MAX_ATTEMPTS. A human decides whether to merge."
-  echo
-  jq -r .body "$RUN_DIR/issue.json" | awk '/^## Acceptance criteria/{on=1; print; next} on && /^## /{exit} on'
-  echo
-  echo "## Agent's report"
-  echo
-  if [ -s "$RUN_DIR/report.md" ]; then head -c 6000 "$RUN_DIR/report.md" | scrubbed; else echo "_The agent wrote no report._"; fi
-} >"$RUN_DIR/pr-body.md"
+# The PR description: ticket, acceptance criteria and the agent's report, which review rounds add to.
+write_pr_body() {
+  {
+    echo "Ticket: $ISSUE_URL (closes #$ISSUE)"
+    echo
+    echo "Opened by the scheduled agent (\`factory/agent-runner.sh\`, run \`$RUN_ID\`). \`npm run check\` passed on attempt $IMPLEMENT_ATTEMPTS of $MAX_ATTEMPTS. A human decides whether to merge."
+    echo
+    jq -r .body "$RUN_DIR/issue.json" | awk '/^## Acceptance criteria/{on=1; print; next} on && /^## /{exit} on'
+    echo
+    echo "## Agent's report"
+    echo
+    # A long report keeps its start (the acceptance criteria) and its end (the latest review round).
+    if [ ! -s "$RUN_DIR/report.md" ]; then echo "_The agent wrote no report._"
+    elif [ "$(wc -c <"$RUN_DIR/report.md")" -le 6000 ]; then scrubbed <"$RUN_DIR/report.md"
+    else { head -c 3000 "$RUN_DIR/report.md"; printf '\n\n_[…]_\n\n'; tail -c 3000 "$RUN_DIR/report.md"; } | scrubbed; fi
+  } >"$RUN_DIR/pr-body.md"
+}
+write_pr_body
 PR_URL=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
 if [ -n "$PR_URL" ]; then
   gh pr edit "$PR_URL" --body-file "$RUN_DIR/pr-body.md" >/dev/null || needs_help "could not update the PR description"
@@ -275,22 +286,47 @@ while :; do
   # finding reads `implemented`), so a new or renamed status is never read as clean.
   open=$(jq -e '[(.findings // [])[] | select(.attribution_status | IN("implemented","full_implementation","dismissed","detected_after_merge","outdated") | not)]' \
     "$RUN_DIR/review-$ROUND.json") || needs_help "could not read Qodo's review of ${SHA:0:7}"
-  count=$(printf '%s' "$open" | jq length)
-  log "Qodo review of ${SHA:0:7}: $count open finding(s)"
+  # The quality gate (AGENTS.md): open High and Medium findings block, and so does any level not known here; Low
+  # (`informational`) findings are listed for the human at hand-over and never block.
+  blocking=$(printf '%s' "$open" | jq '[.[] | select(.action_level != "informational")]')
+  count=$(printf '%s' "$blocking" | jq length)
+  log "Qodo review of ${SHA:0:7}: $count open High or Medium finding(s), $(printf '%s' "$open" | jq 'map(select(.action_level == "informational")) | length') open Low"
   [ "$count" = 0 ] && break
-  [ "$ROUND" -ge "$MAX_ROUNDS" ] && needs_help "$count Qodo finding(s) still open after $MAX_ROUNDS fix rounds"
+  # A stall: a finding handed over last round is still open after the agent's fix.
+  if [ "$ROUND" -gt 0 ]; then
+    again=$(jq -rn --argjson now "$blocking" --slurpfile before "$RUN_DIR/findings-$ROUND.json" \
+      '[$now[].id] - ([$now[].id] - [$before[0][].id]) | length')
+    [ "$again" != 0 ] && needs_help "$again High or Medium finding(s) still open after the agent's fix in round $ROUND; see its report"
+  fi
+  [ "$ROUND" -ge "$MAX_ROUNDS" ] && needs_help "$count High or Medium finding(s) still open after $MAX_ROUNDS fix rounds"
   ROUND=$((ROUND + 1))
-  printf '%s\n' "$open" >"$RUN_DIR/findings-$ROUND.json"
+  printf '%s\n' "$blocking" >"$RUN_DIR/findings-$ROUND.json"
   run_agent fix-review.md "$RUN_DIR/agent-fix-review-$ROUND.json"
   checks_with_retries "review-$ROUND-" " in review fix round $ROUND"
   [ "$(git -C "$WT" rev-parse HEAD)" = "$SHA" ] && needs_help "the agent changed nothing for $count open finding(s); see its report"
   push || needs_help "git push failed"
+  write_pr_body
+  gh pr edit "$PR_URL" --body-file "$RUN_DIR/pr-body.md" >/dev/null || needs_help "could not update the PR description"
 done
+# Low findings from every round, fixed or not (AGENTS.md quality gate). Rounds are read in order (a glob would put
+# round 10 before round 2), and each finding shows its latest record, even if a later review gave it another level.
+# Titles are Qodo's text, scrubbed like everything else posted.
+reviews=()
+for ((r = 0; r <= ROUND; r++)); do reviews+=("$RUN_DIR/review-$r.json"); done
+low_list=$(jq -rs '[to_entries[] | .key as $round | (.value.findings // [])[] | . + {round: $round}]
+    | group_by(.id) | map(select(any(.action_level == "informational")) | max_by(.round))[]
+    | "- \(.title) (`\(.location.file_path // "?"):\(.location.start_line // "?")`, \(.action_level), \(.attribution_status))"' \
+    "${reviews[@]}" | scrubbed)
+[ -n "$low_list" ] || low_list="None."
 
 # --- Hand over -------------------------------------------------------------------------------------------------
 trap - INT TERM
+# The hand-over carries the Low findings for the human, so it must arrive; only then is the claim released.
+gh issue comment "$ISSUE" -R "$REPO" --body "The scheduled agent finished: $PR_URL is ready for a human. \`npm run check\` passes, and Qodo's review of \`${SHA:0:7}\` has no open High or Medium findings ($ROUND fix round(s)), so the quality gate in AGENTS.md is met. Run \`$RUN_ID\`.
+
+**Low findings for you** (the agent leaves them to you; status in Qodo's latest review):
+$low_list" >/dev/null || needs_help "$PR_URL is ready, but the hand-over comment (with the Low findings) could not be posted"
 # If the label stayed, every later run would see a claimed ticket and wait: say so instead of finishing quietly.
 gh issue edit "$ISSUE" -R "$REPO" --remove-label agent-working >/dev/null ||
   needs_help "$PR_URL is ready, but the agent-working label could not be removed"
-comment "The scheduled agent finished: $PR_URL is ready for a human. \`npm run check\` passes, and Qodo's review of \`${SHA:0:7}\` has no open findings ($ROUND fix round(s)). Run \`$RUN_ID\`."
 log "done: $PR_URL"
