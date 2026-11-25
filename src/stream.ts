@@ -1,5 +1,5 @@
 import { openUrlStart } from './detectors.js';
-import { collect, Numbering, PLACEHOLDER, type ScrubMap, type Span } from './scrub.js';
+import { collect, MAX_ESCAPE_RUN, Numbering, PLACEHOLDER, type ScrubMap, type Span } from './scrub.js';
 
 /**
  * How far past the start of a match the text must have arrived before the match is known: a private key block's END
@@ -93,6 +93,9 @@ export class StreamScrubber {
     // scan (`aaa[EMAI` + `L_1]`). Found by Qodo in the review of PR #22.
     this.numbers.reserve(text);
     let cut = final ? text.length : text.length - this.window;
+    // A match not yet found can still take up to `MAX_ESCAPE_RUN` backslashes before it, and one more for an odd run
+    // (`takeEscape`), so those are not written out yet (issue #24: a token is found only once all of it has arrived).
+    if (!final) for (let k = 0; k <= MAX_ESCAPE_RUN && text.charCodeAt(cut - 1) === 92; k++) cut--;
     for (const s of spans) if (s.start < cut && cut < s.end) cut = s.start;
     // A placeholder-shaped literal is not cut either: it would be reserved only after its first half was written.
     for (const m of text.matchAll(PLACEHOLDER)) if (m.index < cut && cut < m.index + m[0].length) cut = m.index;

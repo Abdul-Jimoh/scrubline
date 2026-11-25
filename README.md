@@ -110,10 +110,13 @@ Errors exit with code 2 and never show input text, map values, arguments or file
 Keys are found at token boundaries: after whitespace, punctuation, `_` or quotes; after an escape (`\n`, `\t`,
 `\uXXXX`), a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code; and in Telegram's `…/bot<token>/…` URLs.
 A complete private key block (BEGIN to END) is masked whatever its armour lines hold. A scrubbed JSON document
-stays valid JSON: no mask starts inside an escape, and a mask that would start right after an escaping backslash
-(`\n` + `pm_…`) takes the backslash with it. An address whose `@` comes straight after an escape letter
-(`\r@a.co`) is masked from the letter, with the backslash. A local part may hold `\uXXXX` escapes for its own
-characters (`xr@a.co` is `xr@a.co`), and the whole address is masked. One exception is under Known limits.
+stays valid JSON: no mask starts inside an escape, and a mask right after a lone backslash (`DOMAIN\jane@…`)
+takes that backslash with it. A mask that starts on an escape letter or an escape takes the whole run of backslashes
+before it: `\n` + `pm_…`, `\r@a.co`, `\u0072@a.co`. Where the run could be a path separator or an inner `\n`, the
+rule is that the output stays decodable at every layer of JSON inside JSON, and `restore` gives the run back
+exactly: `C:\\npm_…` becomes `C:[NPM_TOKEN_1]` (issues #21 and #24). A local part may hold `\uXXXX`
+escapes for its own characters (`x\u0072@a.co` is `xr@a.co`), and the whole address is masked. One exception is under
+Known limits.
 
 A home path is found only where a path starts: `/Users` or `/home` after whitespace, punctuation, a quote, an escape
 or `file://` (in any case), not inside another path (`/opt/home/x`, `foo/Users/x`); a drive letter not glued to a
@@ -141,9 +144,9 @@ not stream yet: it reads its whole input.
 - In JSON, an escape letter right before an address-shaped `@…` is masked with it: `foo\n@bar.com` (a newline, then
   `@bar.com`) becomes `foo[EMAIL_1]`, because `\n@bar.com` can also be read as text holding the address `n@bar.com`.
   The line break is hidden until `restore`, which puts it back.
-- An address that starts on an escape (`\r@`, `\u0072@`) takes at most 32 of the backslashes before it, so a stream
-  finds it before any of them are written out. In JSON nested up to six layers every layer stays valid; deeper, the
-  innermost layer may not parse. The address is still masked, and `restore` is exact.
+- A mask that starts on an escape letter or an escape (`\npm_…`, `\r@`, `\u0072@`) takes at most 32 of the
+  backslashes before it, so a stream still holds them when the match is found. In JSON nested up to six layers every
+  layer stays valid; deeper, the innermost layer may not parse. The value is still masked, and `restore` is exact.
 - In JSON inside JSON, an address whose local part holds a `\uXXXX` escape (`x\u0072@a.co`, which is `xr@a.co`) is
   masked from the first escape, so the characters before it (`x`) stay visible. In plain JSON the whole address is
   masked.

@@ -156,6 +156,52 @@ const documentWith = (sep: fc.Arbitrary<string>) => fc
   });
 const document = documentWith(separator);
 
+/**
+ * JSON written by hand around values that start on an escape letter or an escape (`\n` + `pm_…`, `\r@a.co`,
+ * `\u0072@a.co`) or follow a run of backslashes, then encoded one to three layers deep (issues #21 and #24). A raw run
+ * stays short enough that, three layers out, a match never takes more than the 32 backslashes it may (README "Known
+ * limits"). `layers` is how many layers decode before scrubbing; a `"` or a lone backslash can stop that early.
+ */
+const escapeBefore = fc.oneof(
+  {
+    arbitrary: cat(
+      fc.nat(3).map((n) => '\\\\'.repeat(n)),
+      fc.constantFrom('', ' ', 'x', '\\n', '\\r', '\\t', '\\b', '\\f', '\\u0001', '\\u00e9', '\\/'),
+    ),
+    weight: 19,
+  },
+  // Text that leaves the inner layer invalid from the start: a lone backslash, `\v` (not a JSON escape), a quote.
+  { arbitrary: fc.constantFrom('\\', '\\\\\\', '\\v', '"'), weight: 1 },
+);
+const escapeMatch = fc.oneof(
+  token('npm_', ALNUM, 36),
+  token('pm_', ALNUM, 36),
+  token('ghp_', ALNUM, 36),
+  token('sk_live_', ALNUM, 24),
+  token('k_live_', ALNUM, 24),
+  cat(chars(LOW, 0, 3), fc.constantFrom('', '\\u0072', '\\u006a'), chars(LOW, 0, 3), fc.constant('@a.co')).filter((e) => !e.startsWith('@')),
+);
+const nestedJson = fc
+  .tuple(fc.array(fc.tuple(escapeBefore, escapeMatch, escapeBefore), { minLength: 1, maxLength: 6 }), fc.integer({ min: 1, max: 3 }))
+  .map(([parts, depth]) => {
+    let doc = `{"m":"${parts.map((p) => p.join('')).join(' ')}"}`;
+    for (let i = 1; i < depth; i++) doc = JSON.stringify({ m: doc });
+    return { doc, depth };
+  });
+/** How many layers of `{"m": …}` decode, outermost first, up to `depth`. */
+function decodedLayers(doc: string, depth: number): number {
+  let value: unknown = doc;
+  for (let k = 0; k < depth; k++) {
+    try {
+      value = (JSON.parse(value as string) as { m: unknown }).m;
+    } catch {
+      return k;
+    }
+    if (typeof value !== 'string') return k + 1;
+  }
+  return depth;
+}
+
 const runs = { numRuns: 500 };
 
 /** Scrubs `x` as a stream, cut at the given points (fractions of its length), and returns the output and map. */
@@ -294,6 +340,18 @@ describe('properties', () => {
         const { text, map } = streamed(x, at, window);
         expect(restore(text, map)).toBe(x);
         for (const s of ds.flatMap((d) => d.secrets)) expect(text).not.toContain(s);
+      }),
+      runs,
+    );
+  });
+
+  it('every layer of nested JSON that decoded before scrubbing still decodes after, in one go and as a stream', () => {
+    fc.assert(
+      fc.property(nestedJson, cuts, ({ doc, depth }, at) => {
+        const { text, map } = scrub(doc);
+        expect(decodedLayers(text, depth)).toBeGreaterThanOrEqual(decodedLayers(doc, depth));
+        expect(restore(text, map)).toBe(doc);
+        expect(streamed(doc, at, 64)).toEqual({ text, map });
       }),
       runs,
     );

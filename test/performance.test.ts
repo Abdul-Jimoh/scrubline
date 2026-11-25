@@ -33,6 +33,9 @@ const adversarial: [string, string][] = [
   ['escape-letter addresses back to back', '\\r@a.aa'.repeat(N / 7)],
   ['one long backslash run before an escape-letter address', '\\'.repeat(N) + 'r@a.aa'],
   ['backslash runs between escape-letter addresses', ('\\'.repeat(50) + 'r@a.aa').repeat(N / 56)],
+  // A token that starts on an escape letter takes the backslash run before it (issue #24); each walk stops at 32.
+  ['tokens after backslash runs, back to back', ('\\'.repeat(33) + 'n' + 'pm_' + 'A'.repeat(36) + ' ').repeat(N / 74)],
+  ['one long backslash run before a token', '\\'.repeat(N) + 'n' + 'pm_' + 'A'.repeat(36)],
   // `\uXXXX` for a local-part character continues an address rather than starting one (Qodo, PR #23).
   ['escaped local-part letters with no @', '\\u006a'.repeat(N / 6)],
   ['escaped local-part letters, then an @ with no domain', ('\\u006a'.repeat(20) + '@').repeat(N / 121)],

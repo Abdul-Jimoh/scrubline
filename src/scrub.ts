@@ -73,19 +73,39 @@ export function collect(input: string, detectors: readonly Detector[] = DETECTOR
     taken = merged;
   }
   const keepsBackslash = new Set(detectors.filter((d) => d.keepsBackslashBefore).map((d) => d.kind));
-  return taken.map((s, k) => (keepsBackslash.has(s.kind) ? s : absorbEscape(input, s, k > 0 ? taken[k - 1]!.end : 0)));
+  return taken.map((s, k) => (keepsBackslash.has(s.kind) ? s : takeEscape(input, s, k > 0 ? taken[k - 1]!.end : 0)));
 }
 
 /**
- * A span right after an unpaired backslash takes the backslash too. In `\npm_…` the `n` may end a `\n` escape or
- * start an npm token; masking the token without its backslash would leave `\[NPM_TOKEN_1]`, an invalid escape that
- * breaks JSON. Masking one character more keeps the text valid and still restores exactly.
+ * The most backslashes a match that starts on an escape takes with it: half of a stream's smallest window
+ * (`MIN_WINDOW`), so a stream has not yet written them out when the match is found. 32 covers JSON six layers deep.
  */
-function absorbEscape(input: string, s: Span, prevEnd: number): Span {
+export const MAX_ESCAPE_RUN = 32;
+
+/**
+ * Where a match starts once the backslashes before it are settled, so that the output stays decodable at every layer
+ * of escaping and `restore` still returns the original exactly.
+ *
+ * - A match that starts on an escape letter (`\npm_…`, `\r@a.co`) or on an escape (`\u0072@a.co`) takes the whole
+ *   run of backslashes before it, up to `MAX_ESCAPE_RUN`. In JSON inside JSON the inner `\n` is written `\\n`, and
+ *   keeping any of that run left the inner string ending in `\[…]`, an invalid escape (issues #21 and #24).
+ * - After that, or for any other match, a run of odd length means the last backslash escapes the match's first
+ *   character (`DOMAIN\jane@…`), so the match takes that one too. The parity is of the whole run, however long; a
+ *   stream keeps it by dropping an even number of backslashes when it trims its context.
+ */
+function takeEscape(input: string, s: Span, prevEnd: number): Span {
+  let start = s.start;
+  if (input.charCodeAt(start - 1) === 92 && (input.charCodeAt(start) === 92 || ESCAPE_LETTER.test(input[start]!))) {
+    const stop = Math.max(prevEnd, start - MAX_ESCAPE_RUN);
+    while (start > stop && input.charCodeAt(start - 1) === 92) start--;
+  }
   let n = 0;
-  while (s.start - n - 1 >= prevEnd && input.charCodeAt(s.start - n - 1) === 92) n++;
-  return n % 2 === 1 ? { ...s, start: s.start - 1 } : s;
+  while (start - n - 1 >= prevEnd && input.charCodeAt(start - n - 1) === 92) n++;
+  if (n % 2 === 1) start--;
+  return start === s.start ? s : { ...s, start };
 }
+/** A letter that ends a one-letter JSON escape (`\n`) and can also start a match (`npm_…`, `r@a.co`). */
+const ESCAPE_LETTER = /^[nrtfbv]$/;
 
 /**
  * Masks secrets and personal data in `input`. Each distinct value gets a typed, numbered placeholder

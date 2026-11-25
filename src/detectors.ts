@@ -173,33 +173,16 @@ const EMAIL = new RegExp(
  * block. The joining characters stay outside the mask, so the address gets the same placeholder as anywhere else.
  */
 const EMAIL_NEXT = new RegExp(`[._+-]+(?=[A-Za-z0-9]|\\\\u${ALNUM_HEX})(${EMAIL_BODY})`, 'y');
-/**
- * The most backslashes an address that starts on an escape (`\r@`, `\u0072@`) takes with it: half of a stream's
- * smallest window, so a stream has not yet written them out when the address is found.
- */
-const MAX_ESCAPE_RUN = 32;
 /** `git@github.com:org/repo` is an SSH remote, not a person. */
 const SSH_REMOTE = /^git@/i;
 
 function* findEmails(input: string): Iterable<readonly [number, number]> {
-  let prevEnd = 0;
   for (EMAIL.lastIndex = 0; ; ) {
     const m = EMAIL.exec(input);
     if (!m) return;
     let s = m.index;
     let e = s + m[0].length;
-    // An address that starts on an escape letter (`\r@a.co`, issue #21) takes the whole run of backslashes before it.
-    // One backslash is not enough in JSON inside JSON: `\\r` there is the inner `\r`, and keeping half of it left the
-    // inner string ending in `\[EMAIL_1]`, an invalid escape (found by Qodo's local review of the change).
-    // At most `MAX_ESCAPE_RUN` of them: a stream writes text out once `window` (at least 64) characters follow it, so a
-    // longer run could already be written when `r@` arrives, and the address would be left visible (found by Qodo in
-    // the review of PR #23). 32 covers JSON six layers deep; deeper, the innermost layer may not parse.
-    // An address that starts with a `\uXXXX` escape (`r@a.co`) does the same, for the same reason (found by Qodo's
-    // local review of that change, three layers deep).
-    if ((input[s - 1] === '\\' && input[s + 1] === '@') || input[s] === '\\') {
-      const stop = Math.max(prevEnd, s - MAX_ESCAPE_RUN);
-      while (s > stop && input[s - 1] === '\\') s--;
-    }
+    // An address that starts on an escape (`\r@a.co`, `\u0072@a.co`) takes the backslash run before it: `collect`.
     // Tried only right after a match, so each try starts at a new place and the scan stays linear.
     for (;;) {
       if (!SSH_REMOTE.test(input.slice(s, e))) yield [s, e];
@@ -210,7 +193,6 @@ function* findEmails(input: string): Iterable<readonly [number, number]> {
       s = e + n[0].length - n[1]!.length;
       e += n[0].length;
     }
-    prevEnd = e;
     EMAIL.lastIndex = e;
   }
 }
