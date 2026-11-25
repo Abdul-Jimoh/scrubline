@@ -107,8 +107,27 @@ describe('token boundaries', () => {
       expect(text).not.toContain(stripe);
       expect(restore(text, map)).toBe(json);
     }
-    // A backslash that is itself escaped (`\\`) is left alone.
-    expect(scrub(`C:\\\\${FAKE.NPM_TOKEN}`).text).toBe('C:\\\\[NPM_TOKEN_1]');
+    // Ambiguous input (a path separator, or an inner `\n`): the output must stay decodable at every layer, so the
+    // whole backslash run goes with the token, and restore still returns the original exactly (issue #24).
+    const path = `C:\\\\${FAKE.NPM_TOKEN}`;
+    expect(scrub(path).text).toBe('C:[NPM_TOKEN_1]');
+    expect(restore(scrub(path).text, scrub(path).map)).toBe(path);
+  });
+
+  it('keeps every layer of JSON inside JSON valid when a token follows an inner escape letter (issue #24)', () => {
+    const inner = (m: string) => JSON.stringify({ m });
+    const npm = FAKE.NPM_TOKEN.slice(1);
+    // The issue's case: an inner layer written by hand, `{"m":"x\npm_…"}`, then encoded once and twice more.
+    const two = inner(`{"m":"x\\n${npm}"}`);
+    const three = inner(two);
+    for (const [json, layers] of [[two, 2], [three, 3]] as const) {
+      const { text, map } = scrub(json);
+      expect(text).not.toContain(npm);
+      let value = text;
+      for (let i = 0; i < layers; i++) value = JSON.parse(value).m;
+      expect(value, `${layers} layers`).toBe('x[NPM_TOKEN_1]');
+      expect(restore(text, map)).toBe(json);
+    }
   });
 
   it('masks an address after a backslash that is not an escape (DOMAIN\\user style)', () => {
@@ -162,11 +181,12 @@ describe('token boundaries', () => {
 
   it('keeps JSON valid when a token follows an escape after a long run of escaped backslashes (Qodo, PR #23)', () => {
     // `\\` pairs, then `\n` and `pm_…`: the token's `n` ends the escape, so the mask must take that backslash however
-    // long the run before it.
+    // long the run before it, and the JSON must still parse.
     for (let pairs = 0; pairs <= 40; pairs++) {
       const json = JSON.stringify({ m: `${'\\'.repeat(pairs)}\n${FAKE.NPM_TOKEN.slice(1)}` });
       const { text, map } = scrub(json);
-      expect(JSON.parse(text).m, `${pairs} pairs`).toBe(`${'\\'.repeat(pairs)}[NPM_TOKEN_1]`);
+      // The token takes up to 32 backslashes (issue #24), then one more while the rest of the run is odd.
+      expect(JSON.parse(text).m, `${pairs} pairs`).toBe(`${'\\'.repeat(Math.max(0, pairs - 16))}[NPM_TOKEN_1]`);
       expect(restore(text, map)).toBe(json);
     }
   });

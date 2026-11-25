@@ -113,6 +113,27 @@ describe('scrubbing a stream', () => {
     }
   });
 
+  it('takes the same backslash run as scrub when a chunk boundary falls inside it (issue #24)', () => {
+    // Runs around the 32 cap, before a token and an address that start on an escape letter or an escape, each cut
+    // at every point inside the run and inside the match (a token is found only once all of it has arrived); then
+    // the whole text in small chunks.
+    const npm = FAKE.NPM_TOKEN.slice(1);
+    for (const n of [1, 2, 15, 16, 31, 32, 33, 34, 63, 64, 65, 66, 67, 97]) {
+      for (const tail of [`n${npm}`, 'r@a.aa', '\\u0072@a.aa']) {
+        const head = `${filler(100)}x${'\\'.repeat(n)}`;
+        const x = `${head}${tail} end\n${filler(100)}`;
+        const whole = scrub(x).text;
+        for (let at = head.length - n; at <= head.length + tail.length; at++) {
+          const { text, map } = run([x.slice(0, at), x.slice(at)], { window: 64 });
+          expect(text, `${n} backslashes before ${tail.slice(0, 8)}, cut at ${at - head.length}`).toBe(whole);
+          expect(restore(text, map)).toBe(x);
+        }
+        for (const size of [1, 5, 7, 16])
+          expect(run(x.match(new RegExp(`[^]{1,${size}}`, 'g'))!, { window: 64 }).text, `chunks of ${size}`).toBe(whole);
+      }
+    }
+  });
+
   it('drops a URL from the context once it has ended, escaped line end included (Qodo, PR #22)', () => {
     // After `\n` (two characters, as in JSON), the URL has ended; a long run after it must not stay in memory.
     for (const end of ['\\n', '\\"', ' ', '"']) {
