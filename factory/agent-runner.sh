@@ -7,9 +7,10 @@
 #   2. runs Claude Code headless on the ticket with AGENTS.md (factory/prompts/implement.md);
 #   3. runs `npm run check` itself, and gives the agent the failure up to MAX_ATTEMPTS times;
 #   4. pushes the branch and opens a PR with the ticket link and acceptance criteria;
-#   5. waits for Qodo's review of the exact head commit, and if findings are open, gives them to the agent
-#      (factory/prompts/fix-review.md), checks again (with the same MAX_ATTEMPTS retries) and pushes, up to
-#      MAX_REVIEW_ROUNDS times;
+#   5. waits for Qodo's review of the exact head commit, and if High or Medium findings are open (the quality gate in
+#      AGENTS.md), gives them to the agent (factory/prompts/fix-review.md), checks again (with the same MAX_ATTEMPTS
+#      retries) and pushes, up to MAX_REVIEW_ROUNDS times, stopping early if a finding survives a fix; Low findings
+#      are listed for the human when it hands over;
 #   6. stops with label `agent-needs-help` and a comment on the issue whenever a limit is hit or something fails.
 # It never merges: the human does. Text the agent wrote is scrubbed with Scrubline before it is posted.
 # One installation per repository: the lock is local, so two machines running this could claim the same ticket.
@@ -275,22 +276,38 @@ while :; do
   # finding reads `implemented`), so a new or renamed status is never read as clean.
   open=$(jq -e '[(.findings // [])[] | select(.attribution_status | IN("implemented","full_implementation","dismissed","detected_after_merge","outdated") | not)]' \
     "$RUN_DIR/review-$ROUND.json") || needs_help "could not read Qodo's review of ${SHA:0:7}"
-  count=$(printf '%s' "$open" | jq length)
-  log "Qodo review of ${SHA:0:7}: $count open finding(s)"
+  # The quality gate (AGENTS.md): open High and Medium findings block, and so does any level not known here; Low
+  # (`informational`) findings are listed for the human at hand-over and never block.
+  blocking=$(printf '%s' "$open" | jq '[.[] | select(.action_level != "informational")]')
+  LOW=$(printf '%s' "$open" | jq '[.[] | select(.action_level == "informational")]')
+  count=$(printf '%s' "$blocking" | jq length)
+  log "Qodo review of ${SHA:0:7}: $count open High or Medium finding(s), $(printf '%s' "$LOW" | jq length) Low"
   [ "$count" = 0 ] && break
-  [ "$ROUND" -ge "$MAX_ROUNDS" ] && needs_help "$count Qodo finding(s) still open after $MAX_ROUNDS fix rounds"
+  # A stall: a finding handed over last round is still open after the agent's fix.
+  if [ "$ROUND" -gt 0 ]; then
+    again=$(jq -rn --argjson now "$blocking" --slurpfile before "$RUN_DIR/findings-$ROUND.json" \
+      '[$now[].id] - ([$now[].id] - [$before[0][].id]) | length')
+    [ "$again" != 0 ] && needs_help "$again High or Medium finding(s) still open after the agent's fix in round $ROUND; see its report"
+  fi
+  [ "$ROUND" -ge "$MAX_ROUNDS" ] && needs_help "$count High or Medium finding(s) still open after $MAX_ROUNDS fix rounds"
   ROUND=$((ROUND + 1))
-  printf '%s\n' "$open" >"$RUN_DIR/findings-$ROUND.json"
+  printf '%s\n' "$blocking" >"$RUN_DIR/findings-$ROUND.json"
   run_agent fix-review.md "$RUN_DIR/agent-fix-review-$ROUND.json"
   checks_with_retries "review-$ROUND-" " in review fix round $ROUND"
   [ "$(git -C "$WT" rev-parse HEAD)" = "$SHA" ] && needs_help "the agent changed nothing for $count open finding(s); see its report"
   push || needs_help "git push failed"
 done
+# Low findings, flagged for the human (titles are Qodo's text, scrubbed like everything else posted).
+low_list=$(printf '%s' "$LOW" | jq -r '.[] | "- \(.title) (`\(.location.file_path // "?"):\(.location.start_line // "?")`)"' | scrubbed)
+[ -n "$low_list" ] || low_list="None."
 
 # --- Hand over -------------------------------------------------------------------------------------------------
 trap - INT TERM
 # If the label stayed, every later run would see a claimed ticket and wait: say so instead of finishing quietly.
 gh issue edit "$ISSUE" -R "$REPO" --remove-label agent-working >/dev/null ||
   needs_help "$PR_URL is ready, but the agent-working label could not be removed"
-comment "The scheduled agent finished: $PR_URL is ready for a human. \`npm run check\` passes, and Qodo's review of \`${SHA:0:7}\` has no open findings ($ROUND fix round(s)). Run \`$RUN_ID\`."
+comment "The scheduled agent finished: $PR_URL is ready for a human. \`npm run check\` passes, and Qodo's review of \`${SHA:0:7}\` has no open High or Medium findings ($ROUND fix round(s)), so the quality gate in AGENTS.md is met. Run \`$RUN_ID\`.
+
+**Low findings for you** (not changed by the agent):
+$low_list"
 log "done: $PR_URL"

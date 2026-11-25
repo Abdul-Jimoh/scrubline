@@ -115,6 +115,32 @@ review still found three leaks in spellings the generator never produced: `C:\uS
 and a name written as `\u006aane`. On PR #13 the verification agent found the same kind of leak in URL passwords
 (`\u00e9` and PHP's `\/`). A property test only finds leaks in the shapes its generator produces.
 
+## Quality gate
+
+A task is done only when this gate is met. It applies to Qodo's local review of uncommitted code (`qodo review`) and
+to its review of a pull request (`qodo read pr-review-session findings`).
+
+Severity is the finding's `action_level`: `action_required` is High, `remediation_recommended` is Medium,
+`informational` is Low. A Rule violation is a finding whose evidence cites a Qodo rule (`app.qodo.ai/rules/…`);
+others are Bugs or Requirement gaps, as the description says.
+
+- **Fix** every valid High and Medium finding, of any type. A fix comes with a test that fails before it.
+- **Dispute** a High or Medium finding only with evidence, such as a test or the code that rules it out. Report the
+  dispute; a stored dismissal needs the human's OK.
+- **Flag** every Low finding for the human, fixed or not. Leave Low Rule violations unchanged.
+- **Done** when `npm run check` passes, the latest completed review covers the current code (for a PR, the head
+  commit), and no valid High or Medium finding is open.
+- **Not done** when a valid High or Medium finding is still open, checks or the review are incomplete, or the loop
+  stalls: the same finding comes back after a fix, or the round limit is reached. Say what is blocking and what you
+  need.
+
+`factory/agent-runner.sh` enforces this for the scheduled agent: it loops only on open High and Medium findings
+(and on any level it does not know), stops as a stall when a finding it handed over is still open after the fix, and
+lists Low findings for the human when it hands over.
+
+The final report lists each finding with its original severity and type, what was done, the checks and the latest
+review result, and the Low findings for the human.
+
 ## Constraints
 
 - No runtime dependencies. Dev dependencies are pinned to exact versions.
