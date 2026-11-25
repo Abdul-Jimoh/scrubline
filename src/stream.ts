@@ -108,8 +108,17 @@ export class StreamScrubber {
     // The URL password detector needs the scheme, however long the user name before the password is. Found by Qodo
     // in the review of PR #22: a user name longer than the window left the password visible.
     const url = openUrlStart(text, cut, spans);
-    const keep = Math.max(0, cut - this.window);
-    this.context = text.slice(url === -1 ? keep : Math.min(keep, url), cut);
+    let keep = Math.max(0, cut - this.window);
+    if (url !== -1) keep = Math.min(keep, url);
+    // Whether a match takes the backslash before it depends on whether the run of backslashes before it is odd
+    // (`absorbEscape`), however long the run. So the context drops an even number of backslashes from a run it cuts:
+    // a longer run than the context then still gives the answer `scrub` gives (found by Qodo in the review of PR #23).
+    if (text[keep] === '\\') {
+      let dropped = 0;
+      while (keep - dropped > 0 && text[keep - dropped - 1] === '\\') dropped++;
+      if (dropped % 2 === 1) keep--;
+    }
+    this.context = text.slice(keep, cut);
     this.pending = text.slice(cut);
     return out;
   }

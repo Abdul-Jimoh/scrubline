@@ -111,7 +111,9 @@ Keys are found at token boundaries: after whitespace, punctuation, `_` or quotes
 `\uXXXX`), a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code; and in Telegram's `…/bot<token>/…` URLs.
 A complete private key block (BEGIN to END) is masked whatever its armour lines hold. A scrubbed JSON document
 stays valid JSON: no mask starts inside an escape, and a mask that would start right after an escaping backslash
-(`\n` + `pm_…`) takes the backslash with it. One exception is under Known limits.
+(`\n` + `pm_…`) takes the backslash with it. An address whose `@` comes straight after an escape letter
+(`\r@a.co`) is masked from the letter, with the backslash. A local part may hold `\uXXXX` escapes for its own
+characters (`xr@a.co` is `xr@a.co`), and the whole address is masked. One exception is under Known limits.
 
 A home path is found only where a path starts: `/Users` or `/home` after whitespace, punctuation, a quote, an escape
 or `file://` (in any case), not inside another path (`/opt/home/x`, `foo/Users/x`); a drive letter not glued to a
@@ -136,6 +138,15 @@ not stream yet: it reads its whole input.
   are masked only from after the last `%` (from after `%XX` when the `%` is followed by two hex digits); one whose
   local part ends in `%XX` (`jane%3D@…`) is not masked at all.
 - URL-encoded addresses with no literal `@` (`?email=jane%40example.com`) are not detected.
+- In JSON, an escape letter right before an address-shaped `@…` is masked with it: `foo\n@bar.com` (a newline, then
+  `@bar.com`) becomes `foo[EMAIL_1]`, because `\n@bar.com` can also be read as text holding the address `n@bar.com`.
+  The line break is hidden until `restore`, which puts it back.
+- An address that starts on an escape (`\r@`, `\u0072@`) takes at most 32 of the backslashes before it, so a stream
+  finds it before any of them are written out. In JSON nested up to six layers every layer stays valid; deeper, the
+  innermost layer may not parse. The address is still masked, and `restore` is exact.
+- In JSON inside JSON, an address whose local part holds a `\uXXXX` escape (`x\u0072@a.co`, which is `xr@a.co`) is
+  masked from the first escape, so the characters before it (`x`) stay visible. In plain JSON the whole address is
+  masked.
 - In plain text, a mask right after a lone backslash (`DOMAIN\jane@…`) includes the backslash, so that value gets
   its own placeholder, separate from the same address elsewhere, and `restore` puts the backslash back with it.
 - A URL password holding whitespace, a control character, `"` (also `\"` in JSON), `<`, `>`, `` ` ``, `{`, `}`, `|`
