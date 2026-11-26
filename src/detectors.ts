@@ -510,8 +510,8 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
 
 /**
  * Payment card numbers (issue #7): 13 to 19 digits that pass the Luhn check, written as one run (`4111111111111111`)
- * or in groups joined by the same separator throughout: a space, a dash, or a URL-encoded space (`4111 1111 …`, Amex
- * `3782 822463 …`, `4111+1111+…`, `4111%201111%20…`). A grouped card starts with a group of four and continues with
+ * or in groups joined by the same separator throughout: one or two spaces, a tab, a no-break space, a dash, or a
+ * URL-encoded space (`4111 1111 …`, Amex `3782 822463 …`, `4111+1111+…`, `4111%201111%20…`). A grouped card starts with a group of four and continues with
  * groups of three to six, as card networks print them.
  *
  * Only numbers starting with 2 to 6 (Mastercard, Visa, Amex, Diners, JCB, Discover, UnionPay, Maestro): a 13-digit
@@ -521,13 +521,21 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
  * Two steps, so that a card next to other digits is still found: the regex takes each whole run of digit groups (one
  * match per run, never retried from inside it), then `cardSpans` picks the cards within the run.
  */
-const CARD_RUN = new RegExp(`${start(ALNUM)}[0-9]+(?:(?:[ +-]|%20)[0-9]+)*`, 'g');
+/**
+ * What may join two groups: one or two spaces, a tab, a no-break space (as copied from web pages, PDFs and receipts),
+ * a dash, or a URL-encoded space (Qodo review of PR #29). A tab or a no-break space in a JSON string is written `\t` or
+ * `\u00a0` (one more backslash per layer of JSON inside JSON, up to `MAX_ESCAPE_RUN`).
+ */
+const CARD_SEP = '(?: {1,2}|[\\t\\u00a0\\u202f+-]|%20|\\\\{1,32}(?:t|u00[aA]0))';
+/** The longest a card can be: 19 digits in six groups, and five separators of up to 32 backslashes and `u00a0`. */
+const CARD_SPAN_MAX = 19 + 5 * 37;
+const CARD_RUN = new RegExp(`${start(ALNUM)}[0-9]+(?:${CARD_SEP}[0-9]+)*`, 'g');
 /**
  * The groups of a run and the separator after each. A space can be URL-encoded (`4111+1111+…`, `4111%201111%20…`, as in
  * logged query strings and form bodies: Qodo review of PR #29), and `%20` holds digits, so groups are read in order
  * rather than as every run of digits.
  */
-const CARD_GROUP = /([0-9]+)([ +-]|%20)?/g;
+const CARD_GROUP = new RegExp(`([0-9]+)(${CARD_SEP})?`, 'g');
 const groupsOf = (run: string) =>
   [...run.matchAll(CARD_GROUP)].map((m) => ({ start: m.index, end: m.index + m[1]!.length, sep: m[2] ?? '' }));
 const CARD_MIN = 13;
@@ -587,12 +595,12 @@ function* findCards(input: string): Iterable<readonly [number, number]> {
     // Right after `%`, the first two digits may be a URL-encoded byte (`%20` + `2000…`) or the card's own (`%` +
     // `2000…`): both readings are searched and their cards merged (found by the property test). Inside a run, `%20`
     // may be a URL-encoded space between groups or a `%` before a card starting `20…`: the second reading is searched
-    // over the next 64 characters, longer than any card written with `%20` (found by the property test).
+    // over the longest a card can be, `CARD_SPAN_MAX` characters (found by the property test).
     const spans = [...cardSpans(run)];
     if (input[m.index - 1] === '%' && /^[0-9]{2}/.test(run))
       for (const [s, e] of cardSpans(run.slice(2))) spans.push([s + 2, e + 2]);
     for (let p = run.indexOf('%20'); p !== -1; p = run.indexOf('%20', p + 3))
-      for (const [s, e] of cardSpans(run.slice(p + 1, p + 65))) spans.push([s + p + 1, e + p + 1]);
+      for (const [s, e] of cardSpans(run.slice(p + 1, p + 1 + CARD_SPAN_MAX))) spans.push([s + p + 1, e + p + 1]);
     spans.sort((a, b) => a[0] - b[0]);
     let open: [number, number] | undefined;
     for (const [s, e] of spans) {

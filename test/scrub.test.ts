@@ -143,6 +143,10 @@ describe('token boundaries', () => {
       // A space URL-encoded, as in a logged query string or form body (Qodo review of PR #29).
       visa.join('+'),
       visa.join('%20'),
+      // Spacing copied from web pages, PDFs and receipts (Qodo review of PR #29).
+      visa.join('\u00a0'),
+      visa.join('  '),
+      visa.join('\t'),
       amex.join('+'),
       amex.join(' '),
       amex.join(''),
@@ -167,12 +171,24 @@ describe('token boundaries', () => {
     // (found by the property test).
     expect(scrub(`q=%20${visa.join('')}`).text).toBe('q=%20[CARD_NUMBER_1]');
     expect(scrub(`q=%${j('20000000', '00008')}`).text).toBe('q=%[CARD_NUMBER_1]');
+    // A card starting `20…` after `%` inside a run, with separators escaped 20 layers deep, so the card is longer than
+    // 64 characters (Qodo's local review of the fix for PR #29).
+    const deep = '\\'.repeat(20) + 't';
+    expect(scrub(`1234%${['2000', '0000', '0000', '0006'].join(deep)}`).text).toBe('1234%[CARD_NUMBER_1]');
     // The same inside a run, now that `%20` can join groups: a card, `%`, then a card starting `20…`.
     expect(scrub(`${j('20000000', '00008')}%${j('2000000000', '00000006')}`).text).toBe('[CARD_NUMBER_1]%[CARD_NUMBER_2]');
     // Two readings that both pass the Luhn check and overlap are masked as one, so no part of either stays visible.
     expect(scrub(`2002 ${visa.join(' ')}`).text).toBe('[CARD_NUMBER_1]');
     // Two cards in one run stay two cards.
     expect(scrub(`${visa.join(' ')} ${j('5555 5555 ', '5555 4444')}`).text).toBe('[CARD_NUMBER_1] [CARD_NUMBER_2]');
+    // A tab or a no-break space between groups, escaped in JSON and in JSON inside JSON (`\u00a0` by ASCII-only writers).
+    for (const sep of ['\t', '\u00a0']) {
+      const spaced = visa.join(sep);
+      const one = JSON.stringify({ card: spaced });
+      const ascii = one.replace(/\u00a0/g, '\\u00a0');
+      const two = JSON.stringify({ m: ascii });
+      for (const doc of [one, ascii, two]) expect(scrub(doc).text, doc).not.toMatch(/[0-9]{4}/);
+    }
     // In JSON, and in JSON inside JSON (digits, spaces and dashes need no escapes).
     const json = JSON.stringify({ m: JSON.stringify({ card: visa.join(' ') }) });
     expect(JSON.parse(JSON.parse(scrub(json).text).m).card).toBe('[CARD_NUMBER_1]');
@@ -185,6 +201,8 @@ describe('token boundaries', () => {
       `${visa.join('')}abc`,
       '411111111111',
       j('4111111111111111', '1111'),
+      // A card glued to other digits is one longer number (README "Known limits"; Qodo review of PR #29).
+      `9999${visa.join('')}`,
       // Both pass the Luhn check; they start with 1 and 9.
       j('11234567', '89012345'),
       j('91234567', '89012348'),

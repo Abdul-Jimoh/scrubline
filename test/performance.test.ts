@@ -41,6 +41,8 @@ const adversarial: [string, string][] = [
   ['a URL-encoded byte before each digit run', '%20123 '.repeat(N / 7)],
   ['digit groups joined by URL-encoded spaces, never a card', '4111%20'.repeat(N / 7)],
   ['single digits joined by plus signs', '4+'.repeat(N / 2)],
+  ['digit groups joined by two spaces, never a card', '4111  '.repeat(N / 6)],
+  ['single digits joined by no-break spaces', '4\u00a0'.repeat(N / 2)],
   // A card as a bare JSON member value: each look before and after it stops within 32 characters (PR #29).
   ['bare JSON card members back to back', ('"a":' + ['4111', '1111', '1111', '1111'].join('') + ' '.repeat(31) + ',').repeat(N / 52)],
   ['a bare JSON card member then a long backslash run', '"a":' + ['4111', '1111', '1111', '1111'].join('') + '\\'.repeat(N)],

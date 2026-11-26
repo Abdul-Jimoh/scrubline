@@ -53,7 +53,7 @@ const CARD_GROUPS: Record<number, number[][]> = Object.fromEntries(
 );
 /** A card that passes the Luhn check and starts with 2 to 6, ungrouped or grouped by spaces (plain or URL-encoded) or dashes. */
 const card = fc
-  .tuple(fc.constantFrom('2', '3', '4', '5', '6'), fc.integer({ min: 13, max: 19 }), fc.constantFrom('', ' ', '-', '+', '%20'))
+  .tuple(fc.constantFrom('2', '3', '4', '5', '6'), fc.integer({ min: 13, max: 19 }), fc.constantFrom('', ' ', '-', '+', '%20', '  ', '\t', '\u00a0'))
   .chain(([first, length, sep]) =>
     fc.tuple(chars(DIG, length - 2), fc.constantFrom(...CARD_GROUPS[length]!)).map(([mid, groups]) => ({ digits: first + mid, sep, groups })),
   )
@@ -63,7 +63,7 @@ const card = fc
     let at = 0;
     return groups.map((n) => all.slice(at, (at += n))).join(sep);
   });
-const ungroupedCard = card.map((c) => c.replace(/[ +-]|%20/g, ''));
+const ungroupedCard = card.map((c) => c.replace(/[ \t\u00a0+-]|%20/g, ''));
 
 const whole = fc.oneof(
   card,
