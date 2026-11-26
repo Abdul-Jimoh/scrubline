@@ -171,10 +171,12 @@ describe('token boundaries', () => {
     // (found by the property test).
     expect(scrub(`q=%20${visa.join('')}`).text).toBe('q=%20[CARD_NUMBER_1]');
     expect(scrub(`q=%${j('20000000', '00008')}`).text).toBe('q=%[CARD_NUMBER_1]');
-    // A card starting `20…` after `%` inside a run, with separators escaped 20 layers deep, so the card is longer than
-    // 64 characters (Qodo's local review of the fix for PR #29).
-    const deep = '\\'.repeat(20) + 't';
+    // A card starting `20…` after `%` inside a run, with separators escaped three layers deep, the longest they may be
+    // (Qodo's local review of the fix for PR #29); four layers deep, the groups are not read as one card.
+    const deep = '\\'.repeat(4) + 'u00a0';
     expect(scrub(`1234%${['2000', '0000', '0000', '0006'].join(deep)}`).text).toBe('1234%[CARD_NUMBER_1]');
+    const tooDeep = ['2000', '0000', '0000', '0006'].join('\\'.repeat(8) + 't');
+    expect(scrub(`n=${tooDeep};`).text).toBe(`n=${tooDeep};`);
     // The same inside a run, now that `%20` can join groups: a card, `%`, then a card starting `20…`.
     expect(scrub(`${j('20000000', '00008')}%${j('2000000000', '00000006')}`).text).toBe('[CARD_NUMBER_1]%[CARD_NUMBER_2]');
     // Two readings that both pass the Luhn check and overlap are masked as one, so no part of either stays visible.

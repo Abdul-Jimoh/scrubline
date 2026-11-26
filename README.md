@@ -139,7 +139,8 @@ not stream yet: it reads its whole input.
   masked as one. A card glued to a letter (`x4111…`) or to other digits (one run of more than 19 digits), written
   with mixed separators (`4111-1111 1111-…`), grouped in a way no card network prints (a first group other than four
   digits, or a later group shorter than three or longer than six: `41 1111 1111 …`), with its digits as JSON `\uXXXX`
-  escapes, or starting with 1, 7, 8 or 9 (some airline and fuel cards) is not masked. A card that is a bare JSON
+  escapes, with a tab or no-break space between groups escaped more than three layers of JSON deep, or starting with
+  1, 7, 8 or 9 (some airline and fuel cards) is not masked. A card that is a bare JSON
   number other than an object member's value (an array element, or a number with a fraction or a minus sign), more
   than six layers of JSON deep, or with more than eight whitespace characters before it or more than 32 after it, is
   masked as `CARD_NUMBER` and leaves that JSON invalid.

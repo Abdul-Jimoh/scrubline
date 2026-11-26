@@ -524,11 +524,13 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
 /**
  * What may join two groups: one or two spaces, a tab, a no-break space (as copied from web pages, PDFs and receipts),
  * a dash, or a URL-encoded space (Qodo review of PR #29). A tab or a no-break space in a JSON string is written `\t` or
- * `\u00a0` (one more backslash per layer of JSON inside JSON, up to `MAX_ESCAPE_RUN`).
+ * `\u00a0`, with twice the backslashes for each layer of JSON inside JSON: up to four, three layers deep. Deeper, the
+ * card would be longer than a stream's smallest window, which must see a card whole before writing any of it out
+ * (Qodo review of PR #29), so it is not read as a card (README "Known limits").
  */
-const CARD_SEP = '(?: {1,2}|[\\t\\u00a0\\u202f+-]|%20|\\\\{1,32}(?:t|u00[aA]0))';
-/** The longest a card can be: 19 digits in six groups, and five separators of up to 32 backslashes and `u00a0`. */
-const CARD_SPAN_MAX = 19 + 5 * 37;
+const CARD_SEP = '(?: {1,2}|[\\t\\u00a0\\u202f+-]|%20|\\\\{1,4}(?:t|u00[aA]0))';
+/** The longest a card can be: 19 digits in six groups and five separators of up to nine characters, `MIN_WINDOW`. */
+const CARD_SPAN_MAX = 19 + 5 * 9;
 const CARD_RUN = new RegExp(`${start(ALNUM)}[0-9]+(?:${CARD_SEP}[0-9]+)*`, 'g');
 /**
  * The groups of a run and the separator after each. A space can be URL-encoded (`4111+1111+…`, `4111%201111%20…`, as in
