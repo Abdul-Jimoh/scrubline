@@ -41,18 +41,29 @@ const luhnDigit = (body: string) => {
   }
   return String((10 - (sum % 10)) % 10);
 };
-/** How card networks group each length: a first group of four, then groups of three to six. */
-const CARD_GROUPS: Record<number, number[]> = { 13: [4, 3, 3, 3], 14: [4, 6, 4], 15: [4, 6, 5], 16: [4, 4, 4, 4], 17: [4, 4, 4, 5], 18: [4, 4, 4, 6], 19: [4, 4, 4, 4, 3] };
+/** Every way to write `n` digits as groups of three to six. */
+const groupings = (n: number): number[][] =>
+  n === 0 ? [[]] : [3, 4, 5, 6].filter((g) => g <= n).flatMap((g) => groupings(n - g).map((rest) => [g, ...rest]));
+/**
+ * Every grouping the detector accepts for each length: a first group of four, then at least two groups of three to
+ * six (Qodo review of PR #29: one grouping per length left the others untested).
+ */
+const CARD_GROUPS: Record<number, number[][]> = Object.fromEntries(
+  [13, 14, 15, 16, 17, 18, 19].map((len) => [len, groupings(len - 4).filter((g) => g.length >= 2).map((g) => [4, ...g])]),
+);
 /** A card number that passes the Luhn check and starts with 2 to 6, ungrouped or grouped by spaces or dashes. */
 const card = fc
   .tuple(fc.constantFrom('2', '3', '4', '5', '6'), fc.integer({ min: 13, max: 19 }), fc.constantFrom('', ' ', '-'))
-  .chain(([first, length, sep]) => chars(DIG, length - 2).map((mid) => ({ digits: first + mid, sep })))
-  .map(({ digits, sep }) => {
+  .chain(([first, length, sep]) =>
+    fc.tuple(chars(DIG, length - 2), fc.constantFrom(...CARD_GROUPS[length]!)).map(([mid, groups]) => ({ digits: first + mid, sep, groups })),
+  )
+  .map(({ digits, sep, groups }) => {
     const all = digits + luhnDigit(digits);
     if (!sep) return all;
     let at = 0;
-    return CARD_GROUPS[all.length]!.map((n) => all.slice(at, (at += n))).join(sep);
+    return groups.map((n) => all.slice(at, (at += n))).join(sep);
   });
+const ungroupedCard = card.map((c) => c.replace(/[ -]/g, ''));
 
 const whole = fc.oneof(
   card,
@@ -137,12 +148,16 @@ const planted = fc.oneof(
   { arbitrary: whole.map((s) => [s, s, 0] as const), weight: 17 },
   { arbitrary: urlWithPassword, weight: 2 },
   { arbitrary: homePath, weight: 2 },
+  // A card as a bare JSON number, masked as a JSON string (Qodo review of PR #29).
+  { arbitrary: ungroupedCard.map((c) => [`{"id":${c}}`, c, 6] as const), weight: 1 },
 );
 
 /** Text that must survive: words, punctuation, and placeholder-shaped literals that could collide with real masks. */
 const filler = fc.oneof(
   chars(ALNUM + ' .,:;!?()_-/#=+"\'', 0, 30),
-  fc.tuple(fc.constantFrom('EMAIL', 'AWS_KEY', 'JWT', 'GITHUB_TOKEN', 'X'), fc.nat(4)).map(([k, n]) => `[${k}_${n}]`),
+  fc.tuple(fc.constantFrom('EMAIL', 'AWS_KEY', 'JWT', 'GITHUB_TOKEN', 'CARD_NUMBER_JSON', 'X'), fc.nat(4)).map(([k, n]) => `[${k}_${n}]`),
+  // A quoted look-alike of the placeholder `restore` takes quotes away from.
+  fc.nat(4).map((n) => `"[CARD_NUMBER_JSON_${n}]"`),
   fc.constantFrom('[', ']', '[EMAIL_', '_1]', '[]'),
   // Text that turns into a key-shaped run once an escape letter sits in front of it (`\n` + `pm_…`).
   fc.constantFrom('pm_', 'k_live_', 'hp_').chain((p) => token(p, ALNUM, 36)),
@@ -212,6 +227,19 @@ const nestedJson = fc
     for (let i = 1; i < depth; i++) doc = JSON.stringify({ m: doc });
     return { doc, depth };
   });
+/**
+ * Cards written as bare JSON numbers in an object, compact or pretty-printed, then encoded one to three layers deep
+ * (Qodo review of PR #29: `{"id":4111…}` became `{"id":[CARD_NUMBER_1]}`, which is not JSON).
+ */
+const jsonNumberCards = fc
+  .tuple(fc.array(ungroupedCard, { minLength: 1, maxLength: 3 }), fc.constantFrom('', ' ', '\n  ', '\t'), fc.integer({ min: 1, max: 3 }))
+  .map(([cards, gap, depth]) => {
+    const space = gap ? ' ' : '';
+    let doc = `{"m":"x"${cards.map((c, i) => `,${gap}"c${i}":${space}${c}`).join('')}${gap.startsWith('\n') ? '\n' : ''}}`;
+    for (let i = 1; i < depth; i++) doc = JSON.stringify({ m: doc });
+    return { doc, depth, cards };
+  });
+
 /** How many layers of `{"m": …}` decode, outermost first, up to `depth`. */
 function decodedLayers(doc: string, depth: number): number {
   let value: unknown = doc;
@@ -374,6 +402,24 @@ describe('properties', () => {
       fc.property(nestedJson, cuts, ({ doc, depth }, at) => {
         const { text, map } = scrub(doc);
         expect(decodedLayers(text, depth)).toBeGreaterThanOrEqual(decodedLayers(doc, depth));
+        expect(restore(text, map)).toBe(doc);
+        expect(streamed(doc, at, 64)).toEqual({ text, map });
+      }),
+      runs,
+    );
+  });
+
+  it('cards written as bare JSON numbers are masked and every layer still decodes, in one go and as a stream', () => {
+    fc.assert(
+      fc.property(jsonNumberCards, cuts, ({ doc, depth, cards }, at) => {
+        expect(decodedLayers(doc, depth)).toBe(depth);
+        const { text, map } = scrub(doc);
+        expect(decodedLayers(text, depth)).toBe(depth);
+        let inner = text;
+        for (let k = 1; k < depth; k++) inner = (JSON.parse(inner) as { m: string }).m;
+        // Each card is now a string holding its placeholder.
+        for (const value of Object.values(JSON.parse(inner) as object)) expect(typeof value).toBe('string');
+        for (const c of cards) expect(text).not.toContain(c);
         expect(restore(text, map)).toBe(doc);
         expect(streamed(doc, at, 64)).toEqual({ text, map });
       }),

@@ -19,6 +19,11 @@ export interface Detector {
    * `absorbEscape`). Only for formats where that backslash can never start a valid JSON escape.
    */
   readonly keepsBackslashBefore?: boolean;
+  /**
+   * Text that `scrub` puts on both sides of this kind's placeholder, given the input and where the span starts, and
+   * that `restore` takes away again. For a value that must become a JSON string to keep its document valid.
+   */
+  readonly wrap?: (input: string, start: number) => string;
 }
 
 /** A detector from a global regex, with an optional second look at each match. */
@@ -592,6 +597,59 @@ function* findCards(input: string): Iterable<readonly [number, number]> {
   }
 }
 
+/**
+ * A card written as a bare JSON number, the value of an object member (`{"id":4111…}`). Masked as is, the document
+ * would hold `{"id":[CARD_NUMBER_1]}`, which is not JSON (Qodo review of PR #29). So the placeholder is written as a
+ * JSON string, `{"id":"[CARD_NUMBER_JSON_1]"}`, and `restore` takes the added quotes away again. The quotes copy the
+ * key's closing quote, `\"` in JSON inside JSON, so every layer stays valid. Up to eight whitespace characters may come
+ * on each side of the `:` (`JSON.stringify` writes one space after it), and only `,` or `}` may follow the number,
+ * after at most `JSON_GAP` characters of whitespace or escaped line breaks (`\n` in a pretty-printed inner layer). Both
+ * looks stay inside a stream's smallest window, so a stream decides the same as `scrub`.
+ */
+const JSON_GAP = 32;
+
+const isJsonSpace = (c: string | undefined) => c === ' ' || c === '\t' || c === '\r' || c === '\n';
+
+/** The key's closing quote before a member value at `start` (`"`, or `\"` one layer in), or `undefined`. */
+export function jsonMemberQuote(input: string, start: number): string | undefined {
+  let i = start - 1;
+  for (let k = 0; k < 8 && isJsonSpace(input[i]); k++) i--;
+  if (input[i] !== ':') return undefined;
+  i--;
+  for (let k = 0; k < 8 && isJsonSpace(input[i]); k++) i--;
+  if (input[i] !== '"') return undefined;
+  let n = 0;
+  while (n <= JSON_GAP && input.charCodeAt(i - 1 - n) === 92) n++;
+  // Deeper than six layers the quote needs more backslashes than an escape run may take (`MAX_ESCAPE_RUN`): such a
+  // card keeps the plain placeholder (README "Known limits"), and the look back stays inside a stream's window.
+  if (n > JSON_GAP) return undefined;
+  // An escaped quote one layer in is `\"`, two layers in `\\\"`: 2^k - 1 backslashes. A key that ends in a backslash
+  // adds 2^k more for each, so the quote is the longest such run that leaves a whole number of those.
+  for (let q = 31; q > 0; q >>= 1) if (q <= n && (n - q) % (q + 1) === 0) return '\\'.repeat(q) + '"';
+  return '"';
+}
+
+function jsonMemberEnds(input: string, end: number): boolean {
+  let i = end;
+  while (i - end <= JSON_GAP) {
+    const c = input[i];
+    if (c === ',' || c === '}') return true;
+    if (isJsonSpace(c)) i++;
+    else if (c === '\\') {
+      while (input[i] === '\\') i++;
+      if (!/[nrt]/.test(input[i] ?? '')) return false;
+      i++;
+    } else return false;
+  }
+  return false;
+}
+
+function* findJsonCards(input: string): Iterable<readonly [number, number]> {
+  for (const [s, e] of findCards(input))
+    if (/^[0-9]+$/.test(input.slice(s, e)) && jsonMemberQuote(input, s) !== undefined && jsonMemberEnds(input, e))
+      yield [s, e];
+}
+
 export const DETECTORS: readonly Detector[] = [
   { kind: 'PRIVATE_KEY', find: findKeyBlocks },
   // Before JWT and the `sk-` formats: a Telegram token's random half can hold `-sk-…`, which an OpenAI-style match
@@ -625,6 +683,8 @@ export const DETECTORS: readonly Detector[] = [
   // masked as the user name.
   { kind: 'HOME_USER', find: findHomeUsers, keepsBackslashBefore: true },
   { kind: 'EMAIL', find: findEmails },
-  // Last: digits inside a key, a URL password or an address belong to that value.
+  // Last: digits inside a key, a URL password or an address belong to that value. A bare JSON number first, so that
+  // it is masked as a JSON string.
+  { kind: 'CARD_NUMBER_JSON', find: findJsonCards, wrap: (input, start) => jsonMemberQuote(input, start) ?? '' },
   { kind: 'CARD_NUMBER', find: findCards },
 ];

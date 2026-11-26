@@ -39,6 +39,9 @@ const adversarial: [string, string][] = [
   ['single digits joined by dashes', '4-'.repeat(N / 2)],
   ['card-shaped groups back to back', ('4111 ' + '1111 '.repeat(3)).repeat(N / 20)],
   ['a URL-encoded byte before each digit run', '%20123 '.repeat(N / 7)],
+  // A card as a bare JSON member value: each look before and after it stops within 32 characters (PR #29).
+  ['bare JSON card members back to back', ('"a":' + ['4111', '1111', '1111', '1111'].join('') + ' '.repeat(31) + ',').repeat(N / 52)],
+  ['a bare JSON card member then a long backslash run', '"a":' + ['4111', '1111', '1111', '1111'].join('') + '\\'.repeat(N)],
   // A token that starts on an escape letter takes the backslash run before it (issue #24); each walk stops at 32.
   ['tokens after backslash runs, back to back', ('\\'.repeat(33) + 'n' + 'pm_' + 'A'.repeat(36) + ' ').repeat(N / 74)],
   ['one long backslash run before a token', '\\'.repeat(N) + 'n' + 'pm_' + 'A'.repeat(36)],

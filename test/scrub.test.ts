@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DETECTORS, restore, scrub } from '../src/index.js';
-import { AROUND, FAKE, j } from './fixtures.js';
+import { AROUND, FAKE, j, WRAPPED } from './fixtures.js';
 
 describe('every built-in detector masks its format with a typed placeholder', () => {
   it('has a fake sample for every detector', () => {
@@ -11,7 +11,9 @@ describe('every built-in detector masks its format with a typed placeholder', ()
     it(kind, () => {
       const [pre, post] = AROUND[kind as keyof typeof FAKE] ?? ['', ''];
       const { text, map, findings } = scrub(`before ${pre}${value}${post} after`);
-      expect(text).toBe(`before ${pre}[${kind}_1]${post} after`);
+      const q = WRAPPED[kind as keyof typeof FAKE] ?? '';
+      expect(text).toBe(`before ${pre}${q}[${kind}_1]${q}${post} after`);
+      expect(restore(text, map)).toBe(`before ${pre}${value}${post} after`);
       expect(map).toEqual({ [`[${kind}_1]`]: value });
       const start = 7 + pre.length;
       expect(findings).toEqual([{ kind, placeholder: `[${kind}_1]`, start, end: start + value.length }]);
@@ -190,6 +192,55 @@ describe('token boundaries', () => {
       expect(scrub(`n=${spaced};`).text, spaced).toBe(`n=${spaced};`);
     }
     expect(scrub(`{"m":"\\u0034${visa.join('').slice(1)}"}`).text).toBe(`{"m":"\\u0034${visa.join('').slice(1)}"}`);
+  });
+
+  it('masks a card written as a bare JSON number as a JSON string, and restore takes the quotes away (PR #29)', () => {
+    const card = j('4111', '1111', '1111', '1111');
+    const cases: [string, string][] = [
+      [`{"id":${card}}`, '{"id":"[CARD_NUMBER_JSON_1]"}'],
+      [`{"id": ${card}, "n": 1}`, '{"id": "[CARD_NUMBER_JSON_1]", "n": 1}'],
+      [`{\n  "id": ${card}\n}`, '{\n  "id": "[CARD_NUMBER_JSON_1]"\n}'],
+      // Whitespace on either side of the `:`, as some writers put it.
+      [`{"id" :\n  ${card}}`, '{"id" :\n  "[CARD_NUMBER_JSON_1]"}'],
+      // A key that ends in a backslash: its closing quote is still a plain `"`.
+      [`{"a\\\\":${card}}`, '{"a\\\\":"[CARD_NUMBER_JSON_1]"}'],
+    ];
+    for (const [x, want] of cases) {
+      const { text, map } = scrub(x);
+      expect(text, x).toBe(want);
+      expect(JSON.parse(text), x).toBeTypeOf('object');
+      expect(map['[CARD_NUMBER_JSON_1]']).toBe(card);
+      expect(restore(text, map)).toBe(x);
+    }
+    // In JSON inside JSON, two and three layers deep, pretty-printed or not, the added quotes are escaped like the key's.
+    for (const inner of [`{"id":${card}}`, `{\n  "id": ${card}\n}`]) {
+      const two = JSON.stringify({ m: inner });
+      const three = JSON.stringify({ m: two });
+      const s2 = scrub(two);
+      expect(JSON.parse(JSON.parse(s2.text).m).id).toBe('[CARD_NUMBER_JSON_1]');
+      expect(restore(s2.text, s2.map)).toBe(two);
+      const s3 = scrub(three);
+      expect(JSON.parse(JSON.parse(JSON.parse(s3.text).m).m).id).toBe('[CARD_NUMBER_JSON_1]');
+      expect(restore(s3.text, s3.map)).toBe(three);
+    }
+    // Seven layers deep the quote would need 63 backslashes, more than an escape run may take: the card is still
+    // masked, with the plain placeholder.
+    let seven = `{"id":${card}}`;
+    for (let k = 1; k < 7; k++) seven = JSON.stringify({ m: seven });
+    const s7 = scrub(seven);
+    expect(s7.text).toContain('[CARD_NUMBER_1]');
+    expect(s7.text).not.toContain(card);
+    expect(restore(s7.text, s7.map)).toBe(seven);
+    // A card that is already a JSON string, or not a whole member value, keeps the plain placeholder: an array
+    // element, a number with a fraction, a negative number (README "Known limits").
+    expect(scrub(`{"id":"${card}"}`).text).toBe('{"id":"[CARD_NUMBER_1]"}');
+    expect(scrub(`[${card}]`).text).toBe('[[CARD_NUMBER_1]]');
+    expect(scrub(`{"id":${card}.5}`).text).toBe('{"id":[CARD_NUMBER_1].5}');
+    expect(scrub(`{"id":-${card}}`).text).toBe('{"id":-[CARD_NUMBER_1]}');
+    // A quoted look-alike in the input is reserved, so it is not in the map and keeps its quotes.
+    const { text, map } = scrub(`{"id":${card}} "[CARD_NUMBER_JSON_1]" \\"[CARD_NUMBER_JSON_9]"`);
+    expect(text).toBe('{"id":"[CARD_NUMBER_JSON_2]"} "[CARD_NUMBER_JSON_1]" \\"[CARD_NUMBER_JSON_9]"');
+    expect(restore(text, map)).toBe(`{"id":${card}} "[CARD_NUMBER_JSON_1]" \\"[CARD_NUMBER_JSON_9]"`);
   });
 
   it('masks an address after a backslash that is not an escape (DOMAIN\\user style)', () => {
