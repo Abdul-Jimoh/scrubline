@@ -136,6 +136,13 @@ describe('scrubline (issue #4)', () => {
     expect(cli(['restore', '--map', map], first.stdout).stdout).toBe(`use [EMAIL_2] as a template; mine is ${FAKE.EMAIL}`);
   });
 
+  it('a quoted look-alike of a CARD_NUMBER_JSON placeholder typed in the input keeps its quotes (Qodo, PR #29)', () => {
+    const map = join(tmp(), 'map.json');
+    const typed = 'the docs write it as "[CARD_NUMBER_JSON_1]"';
+    const first = cli(['--map', map], typed);
+    expect(cli(['restore', '--map', map], first.stdout).stdout).toBe(typed);
+  });
+
   it('a placeholder from an earlier run in a later paste restores to its value', () => {
     const map = join(tmp(), 'map.json');
     cli(['--map', map], FAKE.EMAIL);

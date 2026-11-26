@@ -510,8 +510,9 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
 
 /**
  * Payment card numbers (issue #7): 13 to 19 digits that pass the Luhn check, written as one run (`4111111111111111`)
- * or in groups joined by one space or one dash throughout (`4111 1111 1111 1111`, Amex `3782 822463 10005`). A
- * grouped card starts with a group of four and continues with groups of three to six, as card networks print them.
+ * or in groups joined by the same separator throughout: a space, a dash, or a URL-encoded space (`4111 1111 …`, Amex
+ * `3782 822463 …`, `4111+1111+…`, `4111%201111%20…`). A grouped card starts with a group of four and continues with
+ * groups of three to six, as card networks print them.
  *
  * Only numbers starting with 2 to 6 (Mastercard, Visa, Amex, Diners, JCB, Discover, UnionPay, Maestro): a 13-digit
  * millisecond timestamp starts with 1, and about one in ten would otherwise pass the Luhn check by chance. Order IDs
@@ -520,7 +521,15 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
  * Two steps, so that a card next to other digits is still found: the regex takes each whole run of digit groups (one
  * match per run, never retried from inside it), then `cardSpans` picks the cards within the run.
  */
-const CARD_RUN = new RegExp(`${start(ALNUM)}[0-9]+(?:[ -][0-9]+)*`, 'g');
+const CARD_RUN = new RegExp(`${start(ALNUM)}[0-9]+(?:(?:[ +-]|%20)[0-9]+)*`, 'g');
+/**
+ * The groups of a run and the separator after each. A space can be URL-encoded (`4111+1111+…`, `4111%201111%20…`, as in
+ * logged query strings and form bodies: Qodo review of PR #29), and `%20` holds digits, so groups are read in order
+ * rather than as every run of digits.
+ */
+const CARD_GROUP = /([0-9]+)([ +-]|%20)?/g;
+const groupsOf = (run: string) =>
+  [...run.matchAll(CARD_GROUP)].map((m) => ({ start: m.index, end: m.index + m[1]!.length, sep: m[2] ?? '' }));
 const CARD_MIN = 13;
 const CARD_MAX = 19;
 
@@ -543,7 +552,7 @@ const isCard = (digits: string): boolean =>
  * check, and masking only one would leave part of the other visible.
  */
 function* cardSpans(run: string): Iterable<readonly [number, number]> {
-  const groups = [...run.matchAll(/[0-9]+/g)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
+  const groups = groupsOf(run);
   let open: [number, number] | undefined;
   for (let i = 0; i < groups.length; i++) {
     const g = groups[i]!;
@@ -551,9 +560,9 @@ function* cardSpans(run: string): Iterable<readonly [number, number]> {
     if (g.end - g.start === 4) {
       // Grouped: a first group of four, then groups of three to six, all joined by the same separator; the longest
       // card from this group. Each try stops by 19 digits, a few groups, so the scan stays linear.
-      const sep = run[g.end];
+      const sep = g.sep;
       let digits = run.slice(g.start, g.end);
-      for (let j = i + 1; j < groups.length && run[groups[j - 1]!.end] === sep; j++) {
+      for (let j = i + 1; j < groups.length && groups[j - 1]!.sep === sep; j++) {
         const len = groups[j]!.end - groups[j]!.start;
         if (len < 3 || len > 6 || digits.length + len > CARD_MAX) break;
         digits += run.slice(groups[j]!.start, groups[j]!.end);
@@ -574,16 +583,16 @@ function* findCards(input: string): Iterable<readonly [number, number]> {
   for (const m of input.matchAll(CARD_RUN)) {
     let run = m[0];
     // A last group glued to a letter (`…1111abc`) is part of a word, not of a card.
-    if (/[A-Za-z]/.test(input[m.index + run.length] ?? '')) {
-      let cut = run.length;
-      while (cut > 0 && run.charCodeAt(cut - 1) >= 48 && run.charCodeAt(cut - 1) <= 57) cut--;
-      run = run.slice(0, Math.max(0, cut - 1));
-    }
+    if (/[A-Za-z]/.test(input[m.index + run.length] ?? '')) run = run.slice(0, groupsOf(run).at(-2)?.end ?? 0);
     // Right after `%`, the first two digits may be a URL-encoded byte (`%20` + `2000…`) or the card's own (`%` +
-    // `2000…`): both readings are searched and their cards merged (found by the property test).
+    // `2000…`): both readings are searched and their cards merged (found by the property test). Inside a run, `%20`
+    // may be a URL-encoded space between groups or a `%` before a card starting `20…`: the second reading is searched
+    // over the next 64 characters, longer than any card written with `%20` (found by the property test).
     const spans = [...cardSpans(run)];
     if (input[m.index - 1] === '%' && /^[0-9]{2}/.test(run))
       for (const [s, e] of cardSpans(run.slice(2))) spans.push([s + 2, e + 2]);
+    for (let p = run.indexOf('%20'); p !== -1; p = run.indexOf('%20', p + 3))
+      for (const [s, e] of cardSpans(run.slice(p + 1, p + 65))) spans.push([s + p + 1, e + p + 1]);
     spans.sort((a, b) => a[0] - b[0]);
     let open: [number, number] | undefined;
     for (const [s, e] of spans) {

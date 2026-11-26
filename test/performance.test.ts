@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { scrub } from '../src/index.js';
+import { restore, scrub } from '../src/index.js';
 import { FAKE, j } from './fixtures.js';
 
 // Scrubline runs on untrusted text (logs, pastes), so a crafted input must not stall it. Each input here is
@@ -39,6 +39,8 @@ const adversarial: [string, string][] = [
   ['single digits joined by dashes', '4-'.repeat(N / 2)],
   ['card-shaped groups back to back', ('4111 ' + '1111 '.repeat(3)).repeat(N / 20)],
   ['a URL-encoded byte before each digit run', '%20123 '.repeat(N / 7)],
+  ['digit groups joined by URL-encoded spaces, never a card', '4111%20'.repeat(N / 7)],
+  ['single digits joined by plus signs', '4+'.repeat(N / 2)],
   // A card as a bare JSON member value: each look before and after it stops within 32 characters (PR #29).
   ['bare JSON card members back to back', ('"a":' + ['4111', '1111', '1111', '1111'].join('') + ' '.repeat(31) + ',').repeat(N / 52)],
   ['a bare JSON card member then a long backslash run', '"a":' + ['4111', '1111', '1111', '1111'].join('') + '\\'.repeat(N)],
@@ -70,6 +72,22 @@ describe('scan time stays linear on crafted input', () => {
     it(name, () => {
       const t = Date.now();
       scrub(input);
+      expect(Date.now() - t).toBeLessThan(1500);
+    });
+});
+
+describe('restore time stays linear on crafted input', () => {
+  // A wrapped placeholder's quote is a run of backslashes; restore once tried it from every backslash in a run
+  // (Qodo review of PR #29).
+  const map = { '[CARD_NUMBER_JSON_1]': ['4111', '1111', '1111', '1111'].join('') };
+  for (const [name, input] of [
+    ['one long backslash run', '\\'.repeat(N)],
+    ['one long backslash run, then a quote', '\\'.repeat(N) + '"x'],
+    ['backslash runs before quoted placeholders that do not match', ('\\'.repeat(40) + '"[CARD_NUMBER_JSON_1]\\"').repeat(N / 63)],
+  ] as const)
+    it(name, () => {
+      const t = Date.now();
+      restore(input, map);
       expect(Date.now() - t).toBeLessThan(1500);
     });
 });

@@ -140,6 +140,10 @@ describe('token boundaries', () => {
       visa.join(' '),
       visa.join('-'),
       visa.join(''),
+      // A space URL-encoded, as in a logged query string or form body (Qodo review of PR #29).
+      visa.join('+'),
+      visa.join('%20'),
+      amex.join('+'),
       amex.join(' '),
       amex.join(''),
       j('6011', '1111', '1111', '1117'),
@@ -155,10 +159,16 @@ describe('token boundaries', () => {
     expect(scrub(`${visa.join(' ')} 2026`).text).toBe('[CARD_NUMBER_1] 2026');
     expect(scrub(`2026-11-26 ${visa.join(' ')}`).text).toBe('2026-11-26 [CARD_NUMBER_1]');
     expect(scrub(`1234-${visa.join('-')}`).text).toBe('1234-[CARD_NUMBER_1]');
+    // A card before a last group glued to letters: only that group is dropped (Qodo review of PR #29 thought the card
+    // was dropped too), with each separator.
+    for (const sep of [' ', '-', '+', '%20'])
+      expect(scrub(`${visa.join(sep)}${sep}5555abc`).text, sep).toBe(`[CARD_NUMBER_1]${sep}5555abc`);
     // After `%`: a URL-encoded byte then a card (`%20` + card), or `%` then a card whose first digits look like a byte
     // (found by the property test).
     expect(scrub(`q=%20${visa.join('')}`).text).toBe('q=%20[CARD_NUMBER_1]');
     expect(scrub(`q=%${j('20000000', '00008')}`).text).toBe('q=%[CARD_NUMBER_1]');
+    // The same inside a run, now that `%20` can join groups: a card, `%`, then a card starting `20…`.
+    expect(scrub(`${j('20000000', '00008')}%${j('2000000000', '00000006')}`).text).toBe('[CARD_NUMBER_1]%[CARD_NUMBER_2]');
     // Two readings that both pass the Luhn check and overlap are masked as one, so no part of either stays visible.
     expect(scrub(`2002 ${visa.join(' ')}`).text).toBe('[CARD_NUMBER_1]');
     // Two cards in one run stay two cards.
@@ -231,6 +241,16 @@ describe('token boundaries', () => {
     expect(s7.text).toContain('[CARD_NUMBER_1]');
     expect(s7.text).not.toContain(card);
     expect(restore(s7.text, s7.map)).toBe(seven);
+    // More than eight whitespace characters before the number, or more than 32 after it, and the card keeps the plain
+    // placeholder: it is still masked (README "Known limits").
+    expect(scrub(`{"id":${' '.repeat(9)}${card}}`).text).toBe(`{"id":${' '.repeat(9)}[CARD_NUMBER_1]}`);
+    expect(scrub(`{"id":${card}${' '.repeat(33)}}`).text).toBe(`{"id":[CARD_NUMBER_1]${' '.repeat(33)}}`);
+    expect(scrub(`{"id":${' '.repeat(8)}${card}${' '.repeat(32)}}`).text).toContain('"[CARD_NUMBER_JSON_1]"');
+    // Quotes stay when the map says the placeholder stands for itself, as the CLI records typed placeholder text.
+    const self = { '[CARD_NUMBER_JSON_1]': '[CARD_NUMBER_JSON_1]' };
+    expect(restore('x "[CARD_NUMBER_JSON_1]" y', self)).toBe('x "[CARD_NUMBER_JSON_1]" y');
+    // A value that is not a number goes in as written, `$&` included (Qodo's local review of the fix for PR #29).
+    expect(restore('"[CARD_NUMBER_JSON_1]"', { '[CARD_NUMBER_JSON_1]': 'a$&b$1' })).toBe('"a$&b$1"');
     // A card that is already a JSON string, or not a whole member value, keeps the plain placeholder: an array
     // element, a number with a fraction, a negative number (README "Known limits").
     expect(scrub(`{"id":"${card}"}`).text).toBe('{"id":"[CARD_NUMBER_1]"}');

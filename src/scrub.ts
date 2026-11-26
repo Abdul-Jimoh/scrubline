@@ -184,9 +184,10 @@ export class Numbering {
 
 /**
  * A placeholder of a wrapped kind with the same quote on both sides, `"[CARD_NUMBER_JSON_1]"` or `\\"…\\"`, or any
- * placeholder.
+ * placeholder. The quote's backslashes are a whole run (`(?<!\\)`), so a long run is tried once, not once from each
+ * backslash in it (Qodo review of PR #29: restore was quadratic in the run's length).
  */
-const RESTORABLE = new RegExp(`(\\\\*)"(\\[(?:${[...WRAP.keys()].join('|')})_\\d+\\])\\1"|${PLACEHOLDER.source}`, 'g');
+const RESTORABLE = new RegExp(`(?<!\\\\)(\\\\*)"(\\[(?:${[...WRAP.keys()].join('|')})_\\d+\\])\\1"|${PLACEHOLDER.source}`, 'g');
 
 /**
  * Puts the original values back. Placeholders that are not in the map are left as they are. A placeholder that
@@ -195,6 +196,9 @@ const RESTORABLE = new RegExp(`(\\\\*)"(\\[(?:${[...WRAP.keys()].join('|')})_\\d
 export function restore(text: string, map: ScrubMap): string {
   return text.replace(RESTORABLE, (m, _q: string | undefined, wrappedPlaceholder: string | undefined) => {
     const p = wrappedPlaceholder ?? m;
-    return Object.hasOwn(map, p) ? map[p]! : m;
+    if (!Object.hasOwn(map, p)) return m;
+    // Only a number loses the quotes: the CLI records placeholder text typed in its input as standing for itself
+    // (`"[CARD_NUMBER_JSON_1]"` typed in quotes keeps them; Qodo review of PR #29).
+    return wrappedPlaceholder === undefined || /^[0-9]+$/.test(map[p]!) ? map[p]! : m.replace(p, () => map[p]!);
   });
 }
