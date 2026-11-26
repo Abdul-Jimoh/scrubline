@@ -130,6 +130,68 @@ describe('token boundaries', () => {
     }
   });
 
+  it('masks card numbers that pass the Luhn check, grouped or not, and keeps other numbers (issue #7)', () => {
+    // Test numbers the card networks publish, assembled so the source holds no complete card-shaped string.
+    const visa = ['4111', '1111', '1111', '1111'];
+    const amex = ['3782', '822463', '10005'];
+    const masked = [
+      visa.join(' '),
+      visa.join('-'),
+      visa.join(''),
+      amex.join(' '),
+      amex.join(''),
+      j('6011', '1111', '1111', '1117'),
+      j('5555', '5555', '5555', '4444'),
+    ];
+    for (const card of masked) {
+      const x = `paid with ${card} today`;
+      const { text, map } = scrub(x);
+      expect(text, card).toBe('paid with [CARD_NUMBER_1] today');
+      expect(restore(text, map)).toBe(x);
+    }
+    // A card among other numbers is still found: a year after it, a date before it, a number joined by the same dash.
+    expect(scrub(`${visa.join(' ')} 2026`).text).toBe('[CARD_NUMBER_1] 2026');
+    expect(scrub(`2026-11-26 ${visa.join(' ')}`).text).toBe('2026-11-26 [CARD_NUMBER_1]');
+    expect(scrub(`1234-${visa.join('-')}`).text).toBe('1234-[CARD_NUMBER_1]');
+    // After `%`: a URL-encoded byte then a card (`%20` + card), or `%` then a card whose first digits look like a byte
+    // (found by the property test).
+    expect(scrub(`q=%20${visa.join('')}`).text).toBe('q=%20[CARD_NUMBER_1]');
+    expect(scrub(`q=%${j('20000000', '00008')}`).text).toBe('q=%[CARD_NUMBER_1]');
+    // Two readings that both pass the Luhn check and overlap are masked as one, so no part of either stays visible.
+    expect(scrub(`2002 ${visa.join(' ')}`).text).toBe('[CARD_NUMBER_1]');
+    // Two cards in one run stay two cards.
+    expect(scrub(`${visa.join(' ')} ${j('5555 5555 ', '5555 4444')}`).text).toBe('[CARD_NUMBER_1] [CARD_NUMBER_2]');
+    // In JSON, and in JSON inside JSON (digits, spaces and dashes need no escapes).
+    const json = JSON.stringify({ m: JSON.stringify({ card: visa.join(' ') }) });
+    expect(JSON.parse(JSON.parse(scrub(json).text).m).card).toBe('[CARD_NUMBER_1]');
+    // Kept: a number that fails the Luhn check, a millisecond timestamp, a number glued to a word, too few or too
+    // many digits, and a number starting with 0, 1, 7, 8 or 9 even if it passes.
+    for (const kept of [
+      j('4111 1111 1111 ', '1112'),
+      '1764115200000',
+      `x${visa.join('')}`,
+      `${visa.join('')}abc`,
+      '411111111111',
+      j('4111111111111111', '1111'),
+      // Both pass the Luhn check; they start with 1 and 9.
+      j('11234567', '89012345'),
+      j('91234567', '89012348'),
+    ])
+      expect(scrub(`n=${kept};`).text, kept).toBe(`n=${kept};`);
+    // Deliberately not accepted (AGENTS.md rule 6): separators mixed within one number, and digits written as JSON
+    // `\uXXXX` escapes, which no JSON writer produces for digits. README "Known limits".
+    expect(scrub(`${visa[0]}-${visa[1]} ${visa[2]}-${visa[3]}`).text).toBe(`${visa[0]}-${visa[1]} ${visa[2]}-${visa[3]}`);
+    // Also deliberately not accepted: groupings no card network prints. The same Luhn-valid digits as `visa`, with a
+    // first group other than four digits, or a later group of two or seven (Qodo's local review).
+    const digits = visa.join('');
+    for (const groups of [[2, 4, 4, 4, 2], [5, 4, 4, 3], [4, 2, 4, 4, 2], [4, 7, 5]]) {
+      let at = 0;
+      const spaced = groups.map((n) => digits.slice(at, (at += n))).join(' ');
+      expect(scrub(`n=${spaced};`).text, spaced).toBe(`n=${spaced};`);
+    }
+    expect(scrub(`{"m":"\\u0034${visa.join('').slice(1)}"}`).text).toBe(`{"m":"\\u0034${visa.join('').slice(1)}"}`);
+  });
+
   it('masks an address after a backslash that is not an escape (DOMAIN\\user style)', () => {
     const { text, map } = scrub(`CORP\\${FAKE.EMAIL}`);
     expect(text).toBe('CORP[EMAIL_1]');

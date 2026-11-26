@@ -23,6 +23,8 @@ export const FAKE = {
   URL_PASSWORD: j('S3cr3t', '-Pa55-', 'w0rd'),
   EMAIL: j('jane.doe', '@', 'example.com'),
   HOME_USER: 'jane',
+  // The Visa test number every payment provider publishes; passes the Luhn check.
+  CARD_NUMBER: j('4111 ', '1111 ', '1111 ', '1111'),
 } as const;
 
 /** Text a sample needs around it to be detected, for kinds that mask only part of what they match. */

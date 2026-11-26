@@ -31,7 +31,31 @@ const armour = fc
   .map((lines) => lines.map((l) => `${l}\n`).join(''));
 
 /** One generator per built-in format whose whole match is the secret. */
+/** The Luhn check digit for `body`. */
+const luhnDigit = (body: string) => {
+  let sum = 0;
+  for (let i = body.length - 1, double = true; i >= 0; i--, double = !double) {
+    let d = body.charCodeAt(i) - 48;
+    if (double && (d *= 2) > 9) d -= 9;
+    sum += d;
+  }
+  return String((10 - (sum % 10)) % 10);
+};
+/** How card networks group each length: a first group of four, then groups of three to six. */
+const CARD_GROUPS: Record<number, number[]> = { 13: [4, 3, 3, 3], 14: [4, 6, 4], 15: [4, 6, 5], 16: [4, 4, 4, 4], 17: [4, 4, 4, 5], 18: [4, 4, 4, 6], 19: [4, 4, 4, 4, 3] };
+/** A card number that passes the Luhn check and starts with 2 to 6, ungrouped or grouped by spaces or dashes. */
+const card = fc
+  .tuple(fc.constantFrom('2', '3', '4', '5', '6'), fc.integer({ min: 13, max: 19 }), fc.constantFrom('', ' ', '-'))
+  .chain(([first, length, sep]) => chars(DIG, length - 2).map((mid) => ({ digits: first + mid, sep })))
+  .map(({ digits, sep }) => {
+    const all = digits + luhnDigit(digits);
+    if (!sep) return all;
+    let at = 0;
+    return CARD_GROUPS[all.length]!.map((n) => all.slice(at, (at += n))).join(sep);
+  });
+
 const whole = fc.oneof(
+  card,
   cat(fc.constantFrom('AKIA', 'ASIA'), chars(UP + DIG, 16)),
   token('ghp_', ALNUM, 36),
   token('github_pat_', ALNUM + '_', 60, 82),

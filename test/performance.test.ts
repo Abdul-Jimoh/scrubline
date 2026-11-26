@@ -33,6 +33,12 @@ const adversarial: [string, string][] = [
   ['escape-letter addresses back to back', '\\r@a.aa'.repeat(N / 7)],
   ['one long backslash run before an escape-letter address', '\\'.repeat(N) + 'r@a.aa'],
   ['backslash runs between escape-letter addresses', ('\\'.repeat(50) + 'r@a.aa').repeat(N / 56)],
+  // A card run is one match however long; within it each group is tried for at most 19 digits (issue #7).
+  ['one long run of digits', '4'.repeat(N)],
+  ['digit groups of four joined by spaces, never a card', '4111 '.repeat(N / 5)],
+  ['single digits joined by dashes', '4-'.repeat(N / 2)],
+  ['card-shaped groups back to back', ('4111 ' + '1111 '.repeat(3)).repeat(N / 20)],
+  ['a URL-encoded byte before each digit run', '%20123 '.repeat(N / 7)],
   // A token that starts on an escape letter takes the backslash run before it (issue #24); each walk stops at 32.
   ['tokens after backslash runs, back to back', ('\\'.repeat(33) + 'n' + 'pm_' + 'A'.repeat(36) + ' ').repeat(N / 74)],
   ['one long backslash run before a token', '\\'.repeat(N) + 'n' + 'pm_' + 'A'.repeat(36)],
