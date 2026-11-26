@@ -1,5 +1,5 @@
 import { openUrlStart } from './detectors.js';
-import { collect, MAX_ESCAPE_RUN, Numbering, PLACEHOLDER, type ScrubMap, type Span } from './scrub.js';
+import { collect, MAX_ESCAPE_RUN, Numbering, PLACEHOLDER, type ScrubMap, type Span, wrapped } from './scrub.js';
 
 /**
  * How far past the start of a match the text must have arrived before the match is known: a private key block's END
@@ -104,7 +104,7 @@ export class StreamScrubber {
     let out = '';
     let last = from;
     for (const s of this.masked(text, spans, from, cut)) {
-      out += text.slice(last, s.start) + this.numbers.assign(s.kind, text.slice(s.start, s.end));
+      out += text.slice(last, s.start) + wrapped(text, s, this.numbers.assign(s.kind, text.slice(s.start, s.end)));
       last = s.end;
     }
     out += text.slice(last, cut);

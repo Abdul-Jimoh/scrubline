@@ -19,6 +19,11 @@ export interface Detector {
    * `absorbEscape`). Only for formats where that backslash can never start a valid JSON escape.
    */
   readonly keepsBackslashBefore?: boolean;
+  /**
+   * Text that `scrub` puts on both sides of this kind's placeholder, given the input and where the span starts, and
+   * that `restore` takes away again. For a value that must become a JSON string to keep its document valid.
+   */
+  readonly wrap?: (input: string, start: number) => string;
 }
 
 /** A detector from a global regex, with an optional second look at each match. */
@@ -503,6 +508,167 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
   }
 }
 
+/**
+ * Payment card numbers (issue #7): 13 to 19 digits that pass the Luhn check, written as one run (`4111111111111111`)
+ * or in groups joined by the same separator throughout: one or two spaces, a tab, a no-break space, a dash, or a
+ * URL-encoded space (`4111 1111 …`, Amex `3782 822463 …`, `4111+1111+…`, `4111%201111%20…`). A grouped card starts with a group of four and continues with
+ * groups of three to six, as card networks print them.
+ *
+ * Only numbers starting with 2 to 6 (Mastercard, Visa, Amex, Diners, JCB, Discover, UnionPay, Maestro): a 13-digit
+ * millisecond timestamp starts with 1, and about one in ten would otherwise pass the Luhn check by chance. Order IDs
+ * and other numbers that pass by chance are masked too (README "Known limits"): masking too much is the safer error.
+ *
+ * Two steps, so that a card next to other digits is still found: the regex takes each whole run of digit groups (one
+ * match per run, never retried from inside it), then `cardSpans` picks the cards within the run.
+ */
+/**
+ * What may join two groups: one or two spaces, a tab, a no-break space (as copied from web pages, PDFs and receipts),
+ * a dash, or a URL-encoded space (Qodo review of PR #29). A tab or a no-break space in a JSON string is written `\t` or
+ * `\u00a0`, with twice the backslashes for each layer of JSON inside JSON: up to four, three layers deep. Deeper, the
+ * card would be longer than a stream's smallest window, which must see a card whole before writing any of it out
+ * (Qodo review of PR #29), so it is not read as a card (README "Known limits").
+ */
+const CARD_SEP = '(?: {1,2}|[\\t\\u00a0\\u202f+-]|%20|\\\\{1,4}(?:t|u00[aA]0))';
+/** The longest a card can be: 19 digits in six groups and five separators of up to nine characters, `MIN_WINDOW`. */
+const CARD_SPAN_MAX = 19 + 5 * 9;
+const CARD_RUN = new RegExp(`${start(ALNUM)}[0-9]+(?:${CARD_SEP}[0-9]+)*`, 'g');
+/**
+ * The groups of a run and the separator after each. A space can be URL-encoded (`4111+1111+…`, `4111%201111%20…`, as in
+ * logged query strings and form bodies: Qodo review of PR #29), and `%20` holds digits, so groups are read in order
+ * rather than as every run of digits.
+ */
+const CARD_GROUP = new RegExp(`([0-9]+)(${CARD_SEP})?`, 'g');
+const groupsOf = (run: string) =>
+  [...run.matchAll(CARD_GROUP)].map((m) => ({ start: m.index, end: m.index + m[1]!.length, sep: m[2] ?? '' }));
+const CARD_MIN = 13;
+const CARD_MAX = 19;
+
+function luhn(digits: string): boolean {
+  let sum = 0;
+  for (let i = digits.length - 1, double = false; i >= 0; i--, double = !double) {
+    let d = digits.charCodeAt(i) - 48;
+    if (double && (d *= 2) > 9) d -= 9;
+    sum += d;
+  }
+  return sum % 10 === 0;
+}
+
+const isCard = (digits: string): boolean =>
+  digits.length >= CARD_MIN && digits.length <= CARD_MAX && digits[0]! >= '2' && digits[0]! <= '6' && luhn(digits);
+
+/**
+ * The cards in one run of digit groups, as `[start, end)` offsets into the run, left to right. Cards that overlap are
+ * masked as one: in `1234 4111 1111 1111 1111` both `1234 4111 1111 1111` and `4111 1111 1111 1111` can pass the Luhn
+ * check, and masking only one would leave part of the other visible.
+ */
+function* cardSpans(run: string): Iterable<readonly [number, number]> {
+  const groups = groupsOf(run);
+  let open: [number, number] | undefined;
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i]!;
+    let end = -1;
+    if (g.end - g.start === 4) {
+      // Grouped: a first group of four, then groups of three to six, all joined by the same separator; the longest
+      // card from this group. Each try stops by 19 digits, a few groups, so the scan stays linear.
+      const sep = g.sep;
+      let digits = run.slice(g.start, g.end);
+      for (let j = i + 1; j < groups.length && groups[j - 1]!.sep === sep; j++) {
+        const len = groups[j]!.end - groups[j]!.start;
+        if (len < 3 || len > 6 || digits.length + len > CARD_MAX) break;
+        digits += run.slice(groups[j]!.start, groups[j]!.end);
+        if (j - i >= 2 && isCard(digits)) end = groups[j]!.end;
+      }
+    } else if (isCard(run.slice(g.start, g.end))) end = g.end; // ungrouped: one group that is a whole card
+    if (end === -1) continue;
+    if (open && g.start < open[1]) open[1] = Math.max(open[1], end);
+    else {
+      if (open) yield open;
+      open = [g.start, end];
+    }
+  }
+  if (open) yield open;
+}
+
+function* findCards(input: string): Iterable<readonly [number, number]> {
+  for (const m of input.matchAll(CARD_RUN)) {
+    let run = m[0];
+    // A last group glued to a letter (`…1111abc`) is part of a word, not of a card.
+    if (/[A-Za-z]/.test(input[m.index + run.length] ?? '')) run = run.slice(0, groupsOf(run).at(-2)?.end ?? 0);
+    // Right after `%`, the first two digits may be a URL-encoded byte (`%20` + `2000…`) or the card's own (`%` +
+    // `2000…`): both readings are searched and their cards merged (found by the property test). Inside a run, `%20`
+    // may be a URL-encoded space between groups or a `%` before a card starting `20…`: the second reading is searched
+    // over the longest a card can be, `CARD_SPAN_MAX` characters (found by the property test).
+    const spans = [...cardSpans(run)];
+    if (input[m.index - 1] === '%' && /^[0-9]{2}/.test(run))
+      for (const [s, e] of cardSpans(run.slice(2))) spans.push([s + 2, e + 2]);
+    for (let p = run.indexOf('%20'); p !== -1; p = run.indexOf('%20', p + 3))
+      for (const [s, e] of cardSpans(run.slice(p + 1, p + 1 + CARD_SPAN_MAX))) spans.push([s + p + 1, e + p + 1]);
+    spans.sort((a, b) => a[0] - b[0]);
+    let open: [number, number] | undefined;
+    for (const [s, e] of spans) {
+      if (open && s < open[1]) open[1] = Math.max(open[1], e);
+      else {
+        if (open) yield [m.index + open[0], m.index + open[1]];
+        open = [s, e];
+      }
+    }
+    if (open) yield [m.index + open[0], m.index + open[1]];
+  }
+}
+
+/**
+ * A card written as a bare JSON number, the value of an object member (`{"id":4111…}`). Masked as is, the document
+ * would hold `{"id":[CARD_NUMBER_1]}`, which is not JSON (Qodo review of PR #29). So the placeholder is written as a
+ * JSON string, `{"id":"[CARD_NUMBER_JSON_1]"}`, and `restore` takes the added quotes away again. The quotes copy the
+ * key's closing quote, `\"` in JSON inside JSON, so every layer stays valid. Up to eight whitespace characters may come
+ * on each side of the `:` (`JSON.stringify` writes one space after it), and only `,` or `}` may follow the number,
+ * after at most `JSON_GAP` characters of whitespace or escaped line breaks (`\n` in a pretty-printed inner layer). Both
+ * looks stay inside a stream's smallest window, so a stream decides the same as `scrub`.
+ */
+const JSON_GAP = 32;
+
+const isJsonSpace = (c: string | undefined) => c === ' ' || c === '\t' || c === '\r' || c === '\n';
+
+/** The key's closing quote before a member value at `start` (`"`, or `\"` one layer in), or `undefined`. */
+export function jsonMemberQuote(input: string, start: number): string | undefined {
+  let i = start - 1;
+  for (let k = 0; k < 8 && isJsonSpace(input[i]); k++) i--;
+  if (input[i] !== ':') return undefined;
+  i--;
+  for (let k = 0; k < 8 && isJsonSpace(input[i]); k++) i--;
+  if (input[i] !== '"') return undefined;
+  let n = 0;
+  while (n <= JSON_GAP && input.charCodeAt(i - 1 - n) === 92) n++;
+  // Deeper than six layers the quote needs more backslashes than an escape run may take (`MAX_ESCAPE_RUN`): such a
+  // card keeps the plain placeholder (README "Known limits"), and the look back stays inside a stream's window.
+  if (n > JSON_GAP) return undefined;
+  // An escaped quote one layer in is `\"`, two layers in `\\\"`: 2^k - 1 backslashes. A key that ends in a backslash
+  // adds 2^k more for each, so the quote is the longest such run that leaves a whole number of those.
+  for (let q = 31; q > 0; q >>= 1) if (q <= n && (n - q) % (q + 1) === 0) return '\\'.repeat(q) + '"';
+  return '"';
+}
+
+function jsonMemberEnds(input: string, end: number): boolean {
+  let i = end;
+  while (i - end <= JSON_GAP) {
+    const c = input[i];
+    if (c === ',' || c === '}') return true;
+    if (isJsonSpace(c)) i++;
+    else if (c === '\\') {
+      while (input[i] === '\\') i++;
+      if (!/[nrt]/.test(input[i] ?? '')) return false;
+      i++;
+    } else return false;
+  }
+  return false;
+}
+
+function* findJsonCards(input: string): Iterable<readonly [number, number]> {
+  for (const [s, e] of findCards(input))
+    if (/^[0-9]+$/.test(input.slice(s, e)) && jsonMemberQuote(input, s) !== undefined && jsonMemberEnds(input, e))
+      yield [s, e];
+}
+
 export const DETECTORS: readonly Detector[] = [
   { kind: 'PRIVATE_KEY', find: findKeyBlocks },
   // Before JWT and the `sk-` formats: a Telegram token's random half can hold `-sk-…`, which an OpenAI-style match
@@ -536,4 +702,8 @@ export const DETECTORS: readonly Detector[] = [
   // masked as the user name.
   { kind: 'HOME_USER', find: findHomeUsers, keepsBackslashBefore: true },
   { kind: 'EMAIL', find: findEmails },
+  // Last: digits inside a key, a URL password or an address belong to that value. A bare JSON number first, so that
+  // it is masked as a JSON string.
+  { kind: 'CARD_NUMBER_JSON', find: findJsonCards, wrap: (input, start) => jsonMemberQuote(input, start) ?? '' },
+  { kind: 'CARD_NUMBER', find: findCards },
 ];

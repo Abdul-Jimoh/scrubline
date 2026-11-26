@@ -23,10 +23,17 @@ export const FAKE = {
   URL_PASSWORD: j('S3cr3t', '-Pa55-', 'w0rd'),
   EMAIL: j('jane.doe', '@', 'example.com'),
   HOME_USER: 'jane',
+  // The Visa test number every payment provider publishes; passes the Luhn check.
+  CARD_NUMBER: j('4111 ', '1111 ', '1111 ', '1111'),
+  CARD_NUMBER_JSON: j('4111', '1111', '1111', '1111'),
 } as const;
 
 /** Text a sample needs around it to be detected, for kinds that mask only part of what they match. */
 export const AROUND: Partial<Record<keyof typeof FAKE, readonly [string, string]>> = {
   URL_PASSWORD: ['postgres://app:', '@db.internal:5432/prod'],
   HOME_USER: ['(/Users/', '/projects/app/index.js:3:9)'],
+  CARD_NUMBER_JSON: ['{"id":', '}'],
 };
+
+/** The quote `scrub` writes on both sides of a kind's placeholder, for kinds whose value it turns into a JSON string. */
+export const WRAPPED: Partial<Record<keyof typeof FAKE, string>> = { CARD_NUMBER_JSON: '"' };

@@ -123,11 +123,19 @@ export function scrub(input: string, options: ScrubOptions = {}): ScrubResult {
   for (const { kind, start, end } of spans) {
     const placeholder = numbers.assign(kind, input.slice(start, end));
     findings.push({ kind, placeholder, start, end });
-    text += input.slice(last, start) + placeholder;
+    text += input.slice(last, start) + wrapped(input, { kind, start, end }, placeholder);
     last = end;
   }
   text += input.slice(last);
   return { text, findings, map: numbers.map };
+}
+
+const WRAP = new Map(DETECTORS.flatMap((d) => (d.wrap ? [[d.kind, d.wrap] as const] : [])));
+
+/** The placeholder as it goes into the text: wrapped for a kind that needs it (`CARD_NUMBER_JSON`), else as is. */
+export function wrapped(input: string, s: Span, placeholder: string): string {
+  const q = WRAP.get(s.kind)?.(input, s.start);
+  return q ? q + placeholder + q : placeholder;
 }
 
 /**
@@ -174,7 +182,23 @@ export class Numbering {
   }
 }
 
-/** Puts the original values back. Placeholders that are not in the map are left as they are. */
+/**
+ * A placeholder of a wrapped kind with the same quote on both sides, `"[CARD_NUMBER_JSON_1]"` or `\\"…\\"`, or any
+ * placeholder. The quote's backslashes are a whole run (`(?<!\\)`), so a long run is tried once, not once from each
+ * backslash in it (Qodo review of PR #29: restore was quadratic in the run's length).
+ */
+const RESTORABLE = new RegExp(`(?<!\\\\)(\\\\*)"(\\[(?:${[...WRAP.keys()].join('|')})_\\d+\\])\\1"|${PLACEHOLDER.source}`, 'g');
+
+/**
+ * Puts the original values back. Placeholders that are not in the map are left as they are. A placeholder that
+ * `scrub` wrapped in quotes (a card that was a bare JSON number) loses the quotes with it.
+ */
 export function restore(text: string, map: ScrubMap): string {
-  return text.replace(PLACEHOLDER, (p) => (Object.hasOwn(map, p) ? map[p]! : p));
+  return text.replace(RESTORABLE, (m, _q: string | undefined, wrappedPlaceholder: string | undefined) => {
+    const p = wrappedPlaceholder ?? m;
+    if (!Object.hasOwn(map, p)) return m;
+    // Only a number loses the quotes: the CLI records placeholder text typed in its input as standing for itself
+    // (`"[CARD_NUMBER_JSON_1]"` typed in quotes keeps them; Qodo review of PR #29).
+    return wrappedPlaceholder === undefined || /^[0-9]+$/.test(map[p]!) ? map[p]! : m.replace(p, () => map[p]!);
+  });
 }

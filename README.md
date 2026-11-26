@@ -89,7 +89,8 @@ Errors exit with code 2 and never show input text, map values, arguments or file
   `restore(scrub(x).text, scrub(x).map)` returns `x` exactly.
 - With a map from earlier runs (`scrub(x, { map })`, or the CLI's `--map`), a placeholder in the input that is in that
   map stands for its value, so `restore` turns it into the value: a follow-up paste that quotes `[EMAIL_1]` restores
-  to the address.
+  to the address. A `CARD_NUMBER_JSON` placeholder written in quotes (`"[CARD_NUMBER_JSON_1]"`), as `scrub` writes it,
+  restores to the bare number without the quotes.
 - Zero runtime dependencies.
 
 ## What it detects today
@@ -106,13 +107,15 @@ Errors exit with code 2 and never show input text, map values, arguments or file
 | `URL_PASSWORD` | the password in a URL or connection string (`postgres://app:[URL_PASSWORD_1]@db:5432/prod`); scheme, user, host and path stay readable |
 | `HOME_USER` | the user name in a home-directory path: `/Users/…`, `/home/…`, `C:\Users\…` on any drive, also as `C:/Users/…` and JSON-escaped `C:\\Users\\…` (`at (/Users/[HOME_USER_1]/app/index.js:3:9)`); the rest of the path stays readable, and shared folders (`Shared`, `Public`, `Default`, `All Users`) are kept |
 | `EMAIL` | email addresses (an SSH remote like `git@github.com:…` is kept) |
+| `CARD_NUMBER` | payment card numbers: 13 to 19 digits starting with 2 to 6 that pass the Luhn check, as one run or grouped by spaces or dashes the way cards are printed (`4111 1111 …`, Amex `3782 822463 …`), also with two spaces, a tab, a no-break space or a URL-encoded space (`4111+1111+…`, `4111%201111%20…`); numbers that fail the check, such as most order IDs, and millisecond timestamps are kept |
+| `CARD_NUMBER_JSON` | a card written as a bare JSON number, the value of an object member: masked as a JSON string, `{"id":"[CARD_NUMBER_JSON_1]"}`, so the document stays valid, and `restore` takes the added quotes away again |
 
 Keys are found at token boundaries: after whitespace, punctuation, `_` or quotes; after an escape (`\n`, `\t`,
 `\uXXXX`), a URL-encoded byte (`%3D`, `%20`) or an ANSI colour code; and in Telegram's `…/bot<token>/…` URLs.
 A complete private key block (BEGIN to END) is masked whatever its armour lines hold. A scrubbed JSON document
-stays valid JSON: no mask starts inside an escape, and a mask right after a lone backslash (`DOMAIN\jane@…`)
-takes that backslash with it. A mask that starts on an escape letter or an escape takes the whole run of backslashes
-before it: `\n` + `pm_…`, `\r@a.co`, `\u0072@a.co`. Where the run could be a path separator or an inner `\n`, the
+stays valid JSON: a card stored as a number becomes a string (`CARD_NUMBER_JSON`), no mask starts inside an escape,
+and a mask right after a lone backslash (`DOMAIN\jane@…`) takes that backslash with it. A mask that starts on an
+escape letter or an escape takes the whole run of backslashes before it: `\n` + `pm_…`, `\r@a.co`, `\u0072@a.co`. Where the run could be a path separator or an inner `\n`, the
 rule is that the output stays decodable at every layer of JSON inside JSON, and `restore` gives the run back
 exactly: `C:\\npm_…` becomes `C:[NPM_TOKEN_1]` (issues #21 and #24). A local part may hold `\uXXXX`
 escapes for its own characters (`x\u0072@a.co` is `xr@a.co`), and the whole address is masked. One exception is under
@@ -125,12 +128,22 @@ the text, and a dot that ends a sentence is left out; in JSON, a letter written 
 it. The same name gets the same placeholder in every form of path. A Windows separator is kept outside the mask.
 
 Planned, not built yet, each an issue in the [backlog](https://github.com/Abdul-Jimoh/scrubline/issues): labelled
-secrets (`password=…`), phone and card numbers, IP addresses, high-entropy strings and custom rules. The CLI does
+secrets (`password=…`), phone numbers, IP addresses, high-entropy strings and custom rules. The CLI does
 not stream yet: it reads its whole input.
 
 ## Known limits
 
 - A key glued to a letter or digit on either side (`xAKIA…`), other than in the cases above, is not treated as a key.
+- About one in ten numbers of 13 to 19 digits starting with 2 to 6 passes the Luhn check by chance, so some order IDs
+  and account numbers are masked as `CARD_NUMBER`; where two such readings overlap in one run of digits, both are
+  masked as one. A card glued to a letter (`x4111…`) or to other digits (one run of more than 19 digits), written
+  with mixed separators (`4111-1111 1111-…`), grouped in a way no card network prints (a first group other than four
+  digits, or a later group shorter than three or longer than six: `41 1111 1111 …`), with its digits as JSON `\uXXXX`
+  escapes, with a tab or no-break space between groups escaped more than three layers of JSON deep, or starting with
+  1, 7, 8 or 9 (some airline and fuel cards) is not masked. A card that is a bare JSON
+  number other than an object member's value (an array element, or a number with a fraction or a minus sign), more
+  than six layers of JSON deep, or with more than eight whitespace characters before it or more than 32 after it, is
+  masked as `CARD_NUMBER` and leaves that JSON invalid.
 - A token that runs straight into a JWT (`xoxb-12-eyJ….….…`) is masked as the JWT, which takes priority; a prefix
   left too short for its own format (`xoxb-12-`) stays visible. Real tokens of these kinds contain no dots, so this
   needs an unusual paste.
@@ -204,12 +217,14 @@ every push to `main` (`.github/workflows/check.yml`), and a pull request cannot 
 | Each format above is masked with its typed placeholder | `test/scrub.test.ts`: "every built-in detector" |
 | The boundary cases above, JSON validity, and complete PGP/PEM blocks with armour lines (also in PHP-style `\/` JSON) | `test/scrub.test.ts`: "token boundaries", "private key blocks" |
 | `restore(scrub(x)) === x` for any string | `test/properties.test.ts`: fast-check on arbitrary Unicode and on generated documents |
-| In generated documents (fake keys of every format, armoured key blocks, emails, URLs with passwords, home paths in every form, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid; separated by whitespace, quotes or escapes, every character of every planted value is inside a mask | `test/properties.test.ts` |
+| In generated documents (fake keys of every format, armoured key blocks, emails, card numbers in every grouping, URLs with passwords, home paths in every form, placeholder look-alikes; separated by whitespace, punctuation, escapes, control characters, ANSI codes and URL-encoded bytes), no planted value survives, as plain text or JSON-encoded, and the JSON stays valid; separated by whitespace, quotes or escapes, every character of every planted value is inside a mask | `test/properties.test.ts` |
 | URL passwords: any scheme, only the password masked, encoded passwords and ones holding a raw `@`, `:`, `/`, `?` or `#`, ports, IPv6 hosts and path or query look-alikes kept, JSON (slash-escaped, `\u`-escaped, nested) stays valid, a key as the user name or inside the password keeps its type and does not hide the password, and the limits above | `test/scrub.test.ts`: "passwords in URLs" |
 | Home paths: `/Users`, `/home`, `X:\Users` on any drive, `X:/Users`, JSON-escaped and JSON inside JSON; at the end of a path; shared folders and an empty `/home/` kept; `Users` and `file://` in any case; names written with `\uXXXX` escapes in JSON; only at a path boundary (and after `file://`, an escape, or a key that ran into the drive letter); one placeholder per name across forms; restore and JSON validity; the limits above | `test/scrub.test.ts`: "home-directory paths" |
 | The CLI: bytes kept (BOM, CRLF, non-ASCII, no final newline), file or stdin, the map file (mode 0600 new or rewritten, merged across runs and across 8 overlapping runs, never reassigned, symlinks followed, leftover temporary files removed), typed placeholders kept, a stopped run's lock taken over and a live one waited for, restore, `--summary`, `--`, exit codes, `\| head`, and errors that show no input, map value or argument | `test/cli.test.ts` (runs the built `dist/cli.js`); `test/scrub.test.ts`: "continuing from an earlier map" |
+| Card numbers: grouped and ungrouped, with plain, double, no-break or URL-encoded spaces or tabs, Amex grouping, a card next to a date, a year or other digits, after `%`, in JSON inside JSON; Luhn failures, timestamps, and glued, mixed-separator or unprinted groupings kept | `test/scrub.test.ts`: "masks card numbers" |
+| A card that is a bare JSON member value becomes a JSON string, one to three layers deep, compact or pretty-printed, and `restore` gives the number back; whitespace around the `:`; an array element, a fraction, seven layers or a gap past the bounds keeps the plain placeholder; a quoted look-alike the CLI records as itself keeps its quotes | `test/scrub.test.ts`: "masks a card written as a bare JSON number"; `test/properties.test.ts`: "cards written as bare JSON numbers"; `test/cli.test.ts`: "a quoted look-alike of a CARD_NUMBER_JSON placeholder" |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
-| Scan time stays linear: twenty-six crafted 200,000-character inputs and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; under 40 ms and 140–200 ms on an M-series laptop) |
+| Scan time stays linear: forty-five crafted 200,000-character inputs, three for `restore`, and a 4 MB input with 160,000 findings | `test/performance.test.ts` (1.5 s budget; under 40 ms and 140–200 ms on an M-series laptop) |
 | A 12 MB key block with no END line is masked rather than throwing | `test/performance.test.ts`: "very large input" |
 | A stream cut at any points (mid-key, mid-escape, mid-character) gives the same text and map as `scrub` of the whole, restores exactly and loses every planted value; a key block arriving line by line and a token cut at every position are masked as one value; a URL password after a user name longer than the window; placeholder text cut by a chunk boundary; a string between the bytes of one character; the stream limits above | `test/properties.test.ts`: "a stream …"; `test/stream.test.ts` |
 | Stream memory stays within three windows plus a chunk on 64 MB with a fixed set of secrets. By hand: 1 GiB in 64 KiB chunks peaked at 120 MB resident with 3 map entries (Node 26, M-series laptop, 85 s) | `test/stream.test.ts`: "keeps memory bounded" |

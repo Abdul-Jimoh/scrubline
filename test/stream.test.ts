@@ -209,6 +209,27 @@ describe('scrubbing a stream', () => {
     expect(map).toEqual({ '[EMAIL_1]': FAKE.EMAIL, '[SLACK_TOKEN_1]': FAKE.SLACK_TOKEN });
   });
 
+  it('masks the longest card the smallest window allows, cut anywhere (Qodo review of PR #29)', () => {
+    // 19 digits in six groups, joined by a no-break space escaped three layers deep: 64 characters, `MIN_WINDOW`.
+    const digits = j('4111111111', '111111110');
+    let at = 0;
+    const groups = [4, 3, 3, 3, 3, 3].map((n) => digits.slice(at, (at += n)));
+    const card = groups.join('\\'.repeat(4) + 'u00a0');
+    expect(card).toHaveLength(MIN_WINDOW);
+    // Four layers deep the card would be 84 characters, longer than the window: it is not read as a card at all
+    // (README "Known limits"), so a stream and `scrub` still agree.
+    const tooLong = groups.join('\\'.repeat(8) + 'u00a0');
+    for (const [c, masked] of [[card, true], [tooLong, false]] as const) {
+      const x = `${filler(100)}${c} ${filler(100)}`;
+      const whole = scrub(x);
+      expect(whole.text.includes(c), c).toBe(!masked);
+      for (let cut = 1; cut < x.length; cut++) {
+        const { text, map } = run([x.slice(0, cut), x.slice(cut)], { window: MIN_WINDOW });
+        expect({ text, map }, `cut at ${cut}`).toEqual({ text: whole.text, map: whole.map });
+      }
+    }
+  });
+
   it('refuses a bad window and use after end', () => {
     expect(() => new StreamScrubber({ window: MIN_WINDOW - 1 })).toThrow(RangeError);
     expect(() => new StreamScrubber({ window: MIN_WINDOW + 0.5 })).toThrow(RangeError);
