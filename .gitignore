@@ -11,6 +11,7 @@ coverage/
 !factory/prompts/*.md
 !CHANGELOG.md
 !docs/evidence/**/*.md
+!skills/*/SKILL.md
 
 # raw screenshots (may show email/account details); only cropped copies go in docs/evidence/
 docs/evidence-raw/
