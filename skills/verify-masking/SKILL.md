@@ -49,15 +49,12 @@ Run every command from the repository root. Keep `SKILL_DIR=skills/verify-maskin
    `node $SKILL_DIR/scripts/check.mjs --lib $LIB --cases $CASES`. Expect at least one `FAIL` for each case the change
    fixes. A case that only guards behaviour that must not change may pass on both; label it that way in the report.
 5. **Run the suite.** Run `npm run check`. Record the number of tests passed. Every test must pass.
-6. **Run the property tests at 20,000 runs.** These commands edit the run count and must put it back:
-   ```sh
-   sed -i.bak 's/const runs = { numRuns: 500 }/const runs = { numRuns: Number(process.env.RUNS) }/' test/properties.test.ts
-   RUNS=20000 npx vitest run test/properties.test.ts --testTimeout=900000
-   mv test/properties.test.ts.bak test/properties.test.ts
-   git diff --quiet test/properties.test.ts && echo "run count restored"
-   ```
-   It takes a few minutes. A failure prints a `Counterexample`; record it whole. Check on the base before calling it
-   new.
+6. **Run the property tests at 20,000 runs**, as one command: `sh $SKILL_DIR/scripts/properties.sh 20000`. Run it
+   alone, not chained with `&&` or `;`, and with no variable set before it. It sets the run count, runs the
+   properties, puts the count back (also on failure or interrupt), and prints `run count restored`. It refuses to start
+   if `test/properties.test.ts` has uncommitted changes. It takes a few minutes. A failure prints a `Counterexample`:
+   record it whole, and check on the base before calling it new. If the command can't run (for example, it needs an
+   approval this session can't give), report step 6 as not run and the result as **not verified**.
 7. **Check scan time when a pattern changed.** If `git diff <base>..<head> -- src/` adds or changes a regex with an
    unbounded repeat (`*`, `+`, `{n,}`), find the crafted input for it in `test/performance.test.ts`. Run
    `npx vitest run test/performance.test.ts`. If no crafted input covers the new repeat, report that as a gap.

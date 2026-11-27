@@ -27,7 +27,8 @@ untrusted. A missed secret is a leak that cannot be taken back.
   concrete inputs. `scripts/check.mjs` checks that every character of each value is masked, that `restore` is exact,
   that a stream cut at every position matches `scrub`, and that JSON stays valid, against any build.
   `scripts/build-at.sh` builds the source of another commit, such as the base, without touching the worktree, for a
-  fail-first run. For Claude Code to find it as a project skill (`/verify-masking`), link it once:
+  fail-first run. `scripts/properties.sh` runs the property tests at more runs and always puts the run count back.
+  For Claude Code to find it as a project skill (`/verify-masking`), link it once:
   `mkdir -p .claude/skills && ln -s ../../skills/verify-masking .claude/skills/verify-masking`.
 
 ## Setup and checks
