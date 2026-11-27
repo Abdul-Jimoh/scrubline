@@ -625,13 +625,14 @@ describe('a drive letter in a file:// URL (issue #30)', () => {
     expect(mask('file://ab:/pw@host')).toBe('file://ab:[URL_PASSWORD_1]@host');
   });
 
-  it('criterion 3: restore is exact and a stream cut at every position gives the same text', () => {
+  it('criterion 3: restore is exact and a stream cut at every position gives the same text and map', () => {
     const x = `see file://C:/Users/bob/Mail/${address}.eml now`;
     const { text, map } = scrub(x);
     expect(restore(text, map)).toBe(x);
     for (let cut = 0; cut <= x.length; cut++) {
       const s = new StreamScrubber({ window: 64 });
       expect(s.push(x.slice(0, cut)) + s.push(x.slice(cut)) + s.end()).toBe(text);
+      expect(s.map).toEqual(map);
     }
   });
 });

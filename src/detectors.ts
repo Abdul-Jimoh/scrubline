@@ -437,10 +437,13 @@ function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
  * (`<jwt>-C:\Users\…`) runs on through it, and the name after it must still be masked (found by the test generator).
  * JSON that escapes slashes (PHP's default) writes each `/` as `\/`, and `\\\/` one layer deeper: `\/home\/`,
  * `C:\/Users\/` (issue #30). The separator is the same on both sides of the root.
- * `\\+` backtracks only over its own run, which follows one drive letter, and a run before a POSIX root is read only
- * from its first backslash: linear.
+ * A separator is at most what three layers of JSON make of it: up to 7 backslashes before `/`, up to 8 for `\`. So a
+ * whole prefix is shorter than a stream's smallest window, and a stream finds it again after a cut, as `scrub` does
+ * (found by Qodo in the review of PR #31: with 100 backslashes, a stream kept only part of the first run and left the
+ * name visible). Trade-off: a longer run is not read as a home separator. A run before a POSIX root is read only from
+ * its first backslash: linear.
  */
-const HOME_PREFIX = /((?<!\\)\\*\/|\/)(?:Users|home)\1|[A-Za-z\0]:(\\*\/|\\+)[Uu][Ss][Ee][Rr][Ss]\2/g;
+const HOME_PREFIX = /((?<!\\)\\{0,7}\/|\/)(?:Users|home)\1|[A-Za-z\0]:(\\{0,7}\/|\\{1,8})[Uu][Ss][Ee][Rr][Ss]\2/g;
 /**
  * Before `/Users` or `/home`: not inside a path or a word (`foo/Users/x`, `/opt/home/x`, `./home/x`), except after an
  * escape (`\n/home/jane` in JSON) or `file://`. Trade-off: a relative path such as `../home/jane` or `x//home/jane`
@@ -456,7 +459,7 @@ const AFTER_FILE_URL = /(?<=(?:file|\0):(?:\\*\/){2})/iy;
 /** Before a drive letter: not glued to a letter or digit (`xC:\Users\…`), except after an escape. */
 const DRIVE_START = new RegExp(start(ALNUM), 'y');
 /** A Windows home prefix (as in `HOME_PREFIX`) starting at `lastIndex`, its drive letter at a boundary. */
-const WINDOWS_PREFIX_AT = new RegExp(`${start(ALNUM)}[A-Za-z]:(\\\\*/|\\\\+)[Uu][Ss][Ee][Rr][Ss]\\1`, 'y');
+const WINDOWS_PREFIX_AT = new RegExp(`${start(ALNUM)}[A-Za-z]:(\\\\{0,7}/|\\\\{1,8})[Uu][Ss][Ee][Rr][Ss]\\1`, 'y');
 /**
  * Characters that end a user name: whitespace and control characters (`\0`, claimed text, too), quotes, path
  * separators and punctuation that cannot be in a Windows user name, and `(` `)` `` ` `` `{` `}`, which put a path in

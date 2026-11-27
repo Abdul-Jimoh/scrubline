@@ -21,6 +21,31 @@ const lines = (x: string) => x.split(/(?<=\n)/);
 const filler = (n: number) => 'log line ok\n'.repeat(Math.ceil(n / 12)).slice(0, n);
 
 describe('scrubbing a stream', () => {
+  it('masks a home path at every cut, whatever its separator, as scrub does', () => {
+    // A separator is at most what three layers of JSON make of it; a longer run is not a home separator, in a stream
+    // or in `scrub`. Found by Qodo in the review of PR #31: with 100 backslashes the stream left the name visible.
+    const paths: string[] = [];
+    for (const n of [0, 1, 3, 7, 8, 40, 100]) {
+      const b = '\\'.repeat(n);
+      paths.push(`"${b}/home${b}/jane x"`, `C:${b}/Users${b}/jane x`);
+      if (n > 0) paths.push(`C:${b}Users${b}jane x`);
+    }
+    paths.push('C:' + '\\'.repeat(9) + 'Users' + '\\'.repeat(9) + 'jane x');
+    for (const path of paths) {
+      const x = `${filler(70)}${path}\n${filler(20)}`;
+      const whole = scrub(x);
+      for (let cut = 0; cut <= x.length; cut++) {
+        const { text, map } = run([x.slice(0, cut), x.slice(cut)], { window: 64 });
+        expect({ text, map }, `${path} cut at ${cut}`).toEqual({ text: whole.text, map: whole.map });
+      }
+      const { text, map } = run([...x], { window: 64 });
+      expect({ text, map }, path).toEqual({ text: whole.text, map: whole.map });
+    }
+    // Up to the bound, the name is masked.
+    for (const path of ['"\\\\\\\\\\\\\\/home\\\\\\\\\\\\\\/jane"', 'C:\\\\\\\\\\\\\\\\Users\\\\\\\\\\\\\\\\jane'])
+      expect(scrub(path).text, path).toContain('[HOME_USER_1]');
+  });
+
   it('masks a private key block that arrives line by line as one value', () => {
     const x = `start\n${FAKE.PRIVATE_KEY}\nend\n`;
     const { text } = run(lines(x), { window: 64 });
