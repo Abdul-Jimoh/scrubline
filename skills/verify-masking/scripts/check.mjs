@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // End-to-end masking checks for a list of cases, against one build of Scrubline.
-// Usage: node check.mjs --lib <dist dir> --cases <cases.json> [--window <n>]
+// Usage: node check.mjs --lib <dist dir> --cases <cases.json> [--window <n>] [--base]
 //
-// cases.json: { "cases": [ { "name": "...", "input": "..." | ["part", "part"],
+// cases.json: { "cases": [ { "name": "...", "kind": "fix" | "guard", "input": "..." | ["part", "part"],
 //                            "secrets": ["..." | ["part", "part"]], "expect": "..." (optional) } ] }
 // Parts are joined, so a fake value can be written without a key-shaped literal in the file.
 //
@@ -13,12 +13,17 @@
 //   stream   a stream cut at every position, and one fed a character at a time, gives the same text and map
 //   json     if the input is JSON, the output is too, at every layer of JSON inside a string
 // Prints one line per case and a JSON summary; exits 1 if any check fails, 2 on bad input.
+// With --base (a run on the commit before the change), a `fix` case that passes is counted as `unshown`: it does not
+// show the change. A `guard` case may pass on both.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const args = new Map();
-for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], process.argv[i + 1]);
+for (let i = 2; i < process.argv.length; i++)
+  if (process.argv[i] === '--base') args.set('--base', true);
+  else args.set(process.argv[i], process.argv[++i]);
+const onBase = args.get('--base') === true;
 const libDir = args.get('--lib');
 const casesFile = args.get('--cases');
 if (!libDir || !casesFile) {
@@ -69,6 +74,11 @@ function jsonLayers(orig, out, depth, path, problems) {
 const results = [];
 for (const c of cases) {
   const name = c.name ?? '(unnamed)';
+  const kind = c.kind;
+  if (kind !== 'fix' && kind !== 'guard') {
+    console.error(`check.mjs: case "${name}": kind must be "fix" or "guard"`);
+    process.exit(2);
+  }
   const x = join(c.input);
   const secrets = (c.secrets ?? []).map(join);
   const failed = [];
@@ -123,12 +133,14 @@ for (const c of cases) {
     }
   }
 
-  results.push({ name, pass: failed.length === 0, failed, scrubbed: r.text });
-  console.log(`${failed.length ? 'FAIL' : 'PASS'}  ${name}`);
+  results.push({ name, kind, pass: failed.length === 0, failed, scrubbed: r.text });
+  console.log(`${failed.length ? 'FAIL' : 'PASS'}  [${kind}] ${name}`);
   console.log(`      scrubbed: ${JSON.stringify(r.text)}`);
   for (const f of failed) console.log(`      ${f}`);
 }
 
 const failedCount = results.filter((r) => !r.pass).length;
-console.log(JSON.stringify({ lib: resolve(libDir), window, cases: results.length, failed: failedCount }));
+const summary = { lib: resolve(libDir), window, cases: results.length, failed: failedCount };
+if (onBase) summary.unshown = results.filter((r) => r.kind === 'fix' && r.pass).map((r) => r.name);
+console.log(JSON.stringify(summary));
 process.exit(failedCount ? 1 : 0);

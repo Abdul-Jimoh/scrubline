@@ -27,7 +27,8 @@ Ask for any of these that are missing, and don't guess them:
   fake as parts (`["AKIA", "..."]`) so no key-shaped literal lands in a file.
 - The issue doesn't say what the output should be, and two readings would both mask the value. Ask which one is meant.
 - `node_modules` is missing and `npm ci` fails, or a build fails.
-- A case passes on the base commit. It doesn't show the change, so ask for a case that does. Don't drop it silently.
+- A `fix` case passes on the base commit. It doesn't show the change, so ask for a case that does, or for an OK to
+  relabel it `guard`. Don't drop it silently. A `guard` case passing on the base is expected, not a reason to stop.
 
 ## Steps
 
@@ -37,17 +38,19 @@ Run every command from the repository root. Keep `SKILL_DIR=skills/verify-maskin
    `test/` have uncommitted changes, say that the head build includes them.
 2. **Write the cases** to a file outside the repository: `CASES=$(mktemp -d)/cases.json`. Use this format:
    ```json
-   { "cases": [ { "name": "issue #30: drive letter, address in path",
+   { "cases": [ { "name": "issue #30: drive letter, address in path", "kind": "fix",
                   "input": ["file://C:/Users/bob/Mail/jane", "@", "corp.com.eml"],
                   "secrets": ["bob", ["jane", "@", "corp.com.eml"]] } ] }
    ```
+   Give each case a `kind`: `fix` for an input the change is meant to fix (it must fail on the base), or `guard` for
+   behaviour that must not change (it may pass on both). Decide the kind from the issue before running anything.
    Include the plain form, and each form the change claims to cover: JSON, JSON inside JSON, escaped, other case.
 3. **Check the head.** Run `npm run build`, then `node $SKILL_DIR/scripts/check.mjs --lib dist --cases $CASES`.
    Expect every case to print `PASS`. A `FAIL` line names the check and the visible text: stop and report it.
 4. **Check the base (fail first).** Run `BASE_OUT=$(mktemp -d)`, then
    `LIB=$(sh $SKILL_DIR/scripts/build-at.sh <base> $BASE_OUT)`, and check that it exited 0; then
-   `node $SKILL_DIR/scripts/check.mjs --lib $LIB --cases $CASES`. Expect at least one `FAIL` for each case the change
-   fixes. A case that only guards behaviour that must not change may pass on both; label it that way in the report.
+   `node $SKILL_DIR/scripts/check.mjs --lib $LIB --cases $CASES --base`. With `--base`, the summary counts `fix` cases
+   that pass on the base as `unshown`. Expect `unshown: 0`: each `fix` case fails, and each `guard` case may pass.
 5. **Run the suite.** Run `npm run check`. Record the number of tests passed. Every test must pass.
 6. **Run the property tests at 20,000 runs**, as one command: `sh $SKILL_DIR/scripts/properties.sh 20000`. Run it
    alone, not chained with `&&` or `;`, and with no variable set before it. It sets the run count, runs the
@@ -65,7 +68,7 @@ Run every command from the repository root. Keep `SKILL_DIR=skills/verify-maskin
 
 | Check | Head | Base |
 |---|---|---|
-| `check.mjs` on each case | `PASS` | `FAIL` for each fixed case |
+| `check.mjs` on each case | `PASS` | each `fix` case `FAIL`s (`unshown: []`); a `guard` case may pass |
 | `npm run check` | all tests pass | not run |
 | Property tests, 20,000 runs | 13 passed, run count restored | only to triage a failure |
 | Crafted input for a changed repeat | present and within budget | not run |
