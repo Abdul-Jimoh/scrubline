@@ -27,10 +27,12 @@ describe('scrubbing a stream', () => {
     const paths: string[] = [];
     for (const n of [0, 1, 3, 7, 8, 40, 100]) {
       const b = '\\'.repeat(n);
-      paths.push(`"${b}/home${b}/jane x"`, `C:${b}/Users${b}/jane x`);
+      paths.push(`"${b}/home${b}/jane x"`, `C:${b}/Users${b}/jane x`, `file:${b}/${b}/${b}/Users${b}/jane x`);
       if (n > 0) paths.push(`C:${b}Users${b}jane x`);
     }
     paths.push('C:' + '\\'.repeat(9) + 'Users' + '\\'.repeat(9) + 'jane x');
+    // A long run after `file:`, which the stream drops before the path arrives (found in the next review of PR #31).
+    paths.push('file:' + '\\'.repeat(200) + '///Users/jane x');
     for (const path of paths) {
       const x = `${filler(70)}${path}\n${filler(20)}`;
       const whole = scrub(x);
@@ -42,7 +44,8 @@ describe('scrubbing a stream', () => {
       expect({ text, map }, path).toEqual({ text: whole.text, map: whole.map });
     }
     // Up to the bound, the name is masked.
-    for (const path of ['"\\\\\\\\\\\\\\/home\\\\\\\\\\\\\\/jane"', 'C:\\\\\\\\\\\\\\\\Users\\\\\\\\\\\\\\\\jane'])
+    const seven = '\\'.repeat(7);
+    for (const path of [`"${seven}/home${seven}/jane"`, `C:${seven}\\Users${seven}\\jane`, `file:${seven}/${seven}/${seven}/home${seven}/jane`])
       expect(scrub(path).text, path).toContain('[HOME_USER_1]');
   });
 

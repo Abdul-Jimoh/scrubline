@@ -451,11 +451,12 @@ const HOME_PREFIX = /((?<!\\)\\{0,7}\/|\/)(?:Users|home)\1|[A-Za-z\0]:(\\{0,7}\/
  */
 const POSIX_HOME_START = new RegExp(start('A-Za-z0-9./'), 'y');
 /**
- * Right after `file://` in any case (`FILE:///Users/…`), also with escaped slashes (`file:\/\/`), or after `://`
+ * Right after `file://` in any case (`FILE:///Users/…`), also with escaped slashes (`file:\/\/`, bounded as in
+ * `HOME_PREFIX`, so a stream still holds the scheme: found by Qodo in the review of PR #31), or after `://`
  * whose scheme is claimed text: a key glued on by `_` or `-` runs on into `file` (`sk-proj-…_file:///Users/…`), and
  * the name after it must still be masked (found by the test generator).
  */
-const AFTER_FILE_URL = /(?<=(?:file|\0):(?:\\*\/){2})/iy;
+const AFTER_FILE_URL = /(?<=(?:file|\0):(?:\\{0,7}\/){2})/iy;
 /** Before a drive letter: not glued to a letter or digit (`xC:\Users\…`), except after an escape. */
 const DRIVE_START = new RegExp(start(ALNUM), 'y');
 /** A Windows home prefix (as in `HOME_PREFIX`) starting at `lastIndex`, its drive letter at a boundary. */
