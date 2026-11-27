@@ -381,6 +381,17 @@ export function openUrlStart(
   return s;
 }
 
+/**
+ * Whether the `X:` after `file://` is a Windows drive (`file://C:/Users/…`), not a user name and password: one letter,
+ * then `:` and a `/` or `\\`. The path is then masked as it is without the scheme (`HOME_USER`, `EMAIL`). Other
+ * schemes keep a one-letter user name, so `postgres://u:…@db` still masks its password. Issue #30: the drive was read
+ * as `user:password`, the password ran on to an address's `@` in the path, and the address's domain stayed visible.
+ */
+function isFileDrive(input: string, sep: number, from: number, colon: number): boolean {
+  if (colon !== from + 1 || !/[A-Za-z]/.test(input[from]!) || !'/\\'.includes(input[colon + 1] ?? '')) return false;
+  return sep >= 4 && input.slice(sep - 4, sep).toLowerCase() === 'file' && !SCHEME_CHAR.test(input[sep - 5] ?? ':');
+}
+
 function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
   for (const m of input.matchAll(URL_SEPARATOR)) {
     if (m.index === 0 || !SCHEME_CHAR.test(input[m.index - 1]!)) continue;
@@ -402,6 +413,7 @@ function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
       }
     }
     if (colon === -1 || at <= colon) continue;
+    if (isFileDrive(input, m.index, from, colon)) continue;
     if (alreadyMasked(opaque, colon + 1)) continue;
     // The password, without the claimed text and placeholders inside it.
     let p = colon + 1;

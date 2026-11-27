@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DETECTORS, restore, scrub } from '../src/index.js';
+import { DETECTORS, restore, scrub, StreamScrubber } from '../src/index.js';
 import { AROUND, FAKE, j, WRAPPED } from './fixtures.js';
 
 describe('every built-in detector masks its format with a typed placeholder', () => {
@@ -596,6 +596,46 @@ describe('passwords in URLs (issue #3)', () => {
   });
 });
 
+describe('a drive letter in a file:// URL (issue #30)', () => {
+  const mask = (s: string) => scrub(s).text;
+  const address = j('jane', '@', 'corp.com');
+
+  it('criterion 1: the drive is not a user name and password, and an address in the path is masked whole', () => {
+    // Before #30: `file://C:[URL_PASSWORD_1]@corp.com.eml`, the address's domain visible.
+    expect(mask(`file://C:/Users/bob/Mail/${address}.eml`)).toBe('file://C:/Users/[HOME_USER_1]/Mail/[EMAIL_1]');
+    expect(mask(`FILE://d:/backup/${address}/inbox`)).toBe('FILE://d:/backup/[EMAIL_1]/inbox');
+    // The same path is masked as it is without the scheme, and as with three slashes. (A raw `\` before an address goes
+    // into its mask, as it does on `main`.)
+    for (const path of [`C:/Users/bob/Mail/${address}.eml`, `/C:/Users/bob/Mail/${address}.eml`, `C:\\Users\\bob\\${address}`])
+      expect(mask(`file://${path}`)).toBe(`file://${mask(path)}`);
+    // JSON that escapes slashes, as PHP's json_encode writes it, stays valid.
+    const json = JSON.stringify({ p: `file://C:/Users/bob/${address}` }).replaceAll('/', '\\/');
+    const out = mask(json);
+    expect(out).toBe(String.raw`{"p":"file:\/\/C:\/Users\/[HOME_USER_1]\/[EMAIL_1]"}`);
+    expect(JSON.parse(out).p).toBe('file://C:/Users/[HOME_USER_1]/[EMAIL_1]');
+    // The property tests' counterexample: a home name, an escaped backslash, then an address.
+    expect(mask(String.raw`FILE://C:/Users/aaaaaa\\na@a.aa `)).toBe(String.raw`FILE://C:/Users/[HOME_USER_1]\\n[EMAIL_1] `);
+  });
+
+  it('criterion 2: other schemes, and a one-letter user name, still mask the password', () => {
+    expect(mask('postgres://u:/pw@db/x')).toBe('postgres://u:[URL_PASSWORD_1]@db/x');
+    for (const scheme of ['myfile', 'file.x', 'x-file'])
+      expect(mask(`${scheme}://C:/x@db`), scheme).toBe(`${scheme}://C:[URL_PASSWORD_1]@db`);
+    // A file URL whose user name is longer than one letter is still read as user and password.
+    expect(mask('file://ab:/pw@host')).toBe('file://ab:[URL_PASSWORD_1]@host');
+  });
+
+  it('criterion 3: restore is exact and a stream cut at every position gives the same text', () => {
+    const x = `see file://C:/Users/bob/Mail/${address}.eml now`;
+    const { text, map } = scrub(x);
+    expect(restore(text, map)).toBe(x);
+    for (let cut = 0; cut <= x.length; cut++) {
+      const s = new StreamScrubber({ window: 64 });
+      expect(s.push(x.slice(0, cut)) + s.push(x.slice(cut)) + s.end()).toBe(text);
+    }
+  });
+});
+
 describe('known limit: keys joined by a character of their own alphabet', () => {
   it('a key that may hold _ runs on through it into the next key, leaving that key\'s tail visible (found by the test generator)', () => {
     const sendgrid = FAKE.SENDGRID_KEY;
@@ -762,7 +802,7 @@ describe('home-directory paths (issue #5)', () => {
     expect(scrub(once).findings).toEqual([]);
   });
 
-  it('JSON that escapes slashes (`\\/`), as PHP writes it, also inside JSON', () => {
+  it('JSON that escapes slashes (`\\/`), as PHP writes it, also inside JSON (issue #30)', () => {
     for (const path of ['/home/jane/x', '/Users/jane/x', 'C:/Users/jane/x', 'file:///home/jane/x']) {
       const once = JSON.stringify({ p: path }).replaceAll('/', '\\/');
       const out = mask(once);
