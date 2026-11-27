@@ -50,7 +50,7 @@ Run every command from the repository root. Keep `SKILL_DIR=skills/verify-maskin
 4. **Check the base (fail first).** Run `BASE_OUT=$(mktemp -d)`, then
    `LIB=$(sh $SKILL_DIR/scripts/build-at.sh <base> $BASE_OUT)`, and check that it exited 0; then
    `node $SKILL_DIR/scripts/check.mjs --lib $LIB --cases $CASES --base`. With `--base`, the summary counts `fix` cases
-   that pass on the base as `unshown`. Expect `unshown: 0`: each `fix` case fails, and each `guard` case may pass.
+   that pass on the base as `unshown`. Expect `"unshown":[]`: each `fix` case fails, and each `guard` case may pass.
 5. **Run the suite.** Run `npm run check`. Record the number of tests passed. Every test must pass.
 6. **Run the property tests at 20,000 runs**, as one command: `sh $SKILL_DIR/scripts/properties.sh 20000`. Run it
    alone, not chained with `&&` or `;`, and with no variable set before it. It sets the run count, runs the
@@ -68,7 +68,7 @@ Run every command from the repository root. Keep `SKILL_DIR=skills/verify-maskin
 
 | Check | Head | Base |
 |---|---|---|
-| `check.mjs` on each case | `PASS` | each `fix` case `FAIL`s (`unshown: []`); a `guard` case may pass |
+| `check.mjs` on each case | `PASS` | each `fix` case `FAIL`s (`"unshown":[]`); a `guard` case may pass |
 | `npm run check` | all tests pass | not run |
 | Property tests, 20,000 runs | 13 passed, run count restored | only to triage a failure |
 | Crafted input for a changed repeat | present and within budget | not run |
