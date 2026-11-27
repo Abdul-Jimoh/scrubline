@@ -9,8 +9,13 @@ case $runs in '' | *[!0-9]*) echo "properties.sh: runs must be a number" >&2; ex
 git diff --quiet -- "$file" || { echo "properties.sh: $file has uncommitted changes; stopping" >&2; exit 2; }
 grep -q 'const runs = { numRuns: 500 }' "$file" || { echo "properties.sh: run count line not found in $file" >&2; exit 2; }
 
-backup=$(mktemp)
-cp "$file" "$backup"
+# Stop before touching the file unless the backup is a full copy (found by Qodo in the review of PR #32).
+backup=$(mktemp) || { echo "properties.sh: mktemp failed" >&2; exit 2; }
+if ! cp "$file" "$backup" || ! cmp -s "$file" "$backup"; then
+  echo "properties.sh: could not back up $file; stopping" >&2
+  rm -f "$backup"
+  exit 2
+fi
 restore() {
   [ -f "$backup" ] && cp "$backup" "$file" && rm -f "$backup"
 }

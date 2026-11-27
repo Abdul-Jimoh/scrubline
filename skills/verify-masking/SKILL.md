@@ -35,7 +35,8 @@ Ask for any of these that are missing, and don't guess them:
 Run every command from the repository root. Keep `SKILL_DIR=skills/verify-masking`.
 
 1. **Record the state.** Run `git rev-parse --short HEAD`, `git status --short` and `node --version`. If `src/` or
-   `test/` have uncommitted changes, say that the head build includes them.
+   `test/` has uncommitted changes, stop and ask. The head build and the suite would test the worktree, not the
+   commit range, so the result could not be reported as verified.
 2. **Write the cases** to a file outside the repository: `CASES=$(mktemp -d)/cases.json`. Use this format:
    ```json
    { "cases": [ { "name": "issue #30: drive letter, address in path", "kind": "fix",
@@ -44,13 +45,21 @@ Run every command from the repository root. Keep `SKILL_DIR=skills/verify-maskin
    ```
    Give each case a `kind`: `fix` for an input the change is meant to fix (it must fail on the base), or `guard` for
    behaviour that must not change (it may pass on both). Decide the kind from the issue before running anything.
+   A `fix` case shows the change when the base fails `covered` (part of a value visible) or `expect`. For a change
+   about something else, such as a stream or restore bug, name the checks in `"shows"`, for example
+   `"shows": ["stream"]`.
    Include the plain form, and each form the change claims to cover: JSON, JSON inside JSON, escaped, other case.
 3. **Check the head.** Run `npm run build`, then `node $SKILL_DIR/scripts/check.mjs --lib dist --cases $CASES`.
-   Expect every case to print `PASS`. A `FAIL` line names the check and the visible text: stop and report it.
+   Expect every case to print `PASS`. A `FAIL` line names the check, with character offsets but never the value's
+   characters: stop and report it. A `stream` failure on a value that README Known limits lists under Streams is
+   that limit, not a new failure: report it with the README line, and rerun that case with `--window` set to
+   `DEFAULT_WINDOW` from `src/stream.ts`.
 4. **Check the base (fail first).** Run `BASE_OUT=$(mktemp -d)`, then
    `LIB=$(sh $SKILL_DIR/scripts/build-at.sh <base> $BASE_OUT)`, and check that it exited 0; then
    `node $SKILL_DIR/scripts/check.mjs --lib $LIB --cases $CASES --base`. With `--base`, the summary counts `fix` cases
-   that pass on the base as `unshown`. Expect `"unshown":[]`: each `fix` case fails, and each `guard` case may pass.
+   that don't fail one of their `shows` checks on the base as `unshown`. Expect `"unshown":[]`: each `fix` case fails
+   the way it should, and each `guard` case may pass. A case listed as `failed only: stream`, say, failed on the base
+   for some other reason, so it doesn't show the change.
 5. **Run the suite.** Run `npm run check`. Record the number of tests passed. Every test must pass.
 6. **Run the property tests at 20,000 runs**, as one command: `sh $SKILL_DIR/scripts/properties.sh 20000`. Run it
    alone, not chained with `&&` or `;`, and with no variable set before it. It sets the run count, runs the
@@ -80,5 +89,6 @@ output. Don't fix code inside this procedure. Report the failure, and leave the 
 
 - Commit, push, or edit `src/` or `test/` as part of this check. Step 6 edits only the run count, and step 6 puts it
   back.
-- Put real secrets in a cases file, the report, or a terminal command.
+- Put real secrets in a cases file, the report, or a terminal command. Copy `check.mjs` output into the report as
+  printed: it gives offsets, never the characters of a value.
 - Treat a passing `npm run check` alone as proof: the cases and the fail-first run are the point.
