@@ -423,9 +423,12 @@ function* findUrlPasswords(input: string): Iterable<readonly [number, number]> {
  * means an odd run of `\` before the name never appears in valid JSON (`\U` and `\u` + `sers` are not escapes), so
  * its last `\` is a separator, not an escape. The drive letter may be `\0`: a key glued on by `-` or `_`
  * (`<jwt>-C:\Users\…`) runs on through it, and the name after it must still be masked (found by the test generator).
- * `\\+` backtracks only over its own run, which follows one drive letter: linear.
+ * JSON that escapes slashes (PHP's default) writes each `/` as `\/`, and `\\\/` one layer deeper: `\/home\/`,
+ * `C:\/Users\/` (issue #30). The separator is the same on both sides of the root.
+ * `\\+` backtracks only over its own run, which follows one drive letter, and a run before a POSIX root is read only
+ * from its first backslash: linear.
  */
-const HOME_PREFIX = /\/(?:Users|home)\/|[A-Za-z\0]:(\\+|\/)[Uu][Ss][Ee][Rr][Ss]\1/g;
+const HOME_PREFIX = /((?<!\\)\\*\/|\/)(?:Users|home)\1|[A-Za-z\0]:(\\*\/|\\+)[Uu][Ss][Ee][Rr][Ss]\2/g;
 /**
  * Before `/Users` or `/home`: not inside a path or a word (`foo/Users/x`, `/opt/home/x`, `./home/x`), except after an
  * escape (`\n/home/jane` in JSON) or `file://`. Trade-off: a relative path such as `../home/jane` or `x//home/jane`
@@ -433,15 +436,15 @@ const HOME_PREFIX = /\/(?:Users|home)\/|[A-Za-z\0]:(\\+|\/)[Uu][Ss][Ee][Rr][Ss]\
  */
 const POSIX_HOME_START = new RegExp(start('A-Za-z0-9./'), 'y');
 /**
- * Right after `file://` in any case (`FILE:///Users/…`), or after `://` whose scheme is claimed text: a key glued on
- * by `_` or `-` runs on into `file` (`sk-proj-…_file:///Users/…`), and the name after it must still be masked (found
- * by the test generator).
+ * Right after `file://` in any case (`FILE:///Users/…`), also with escaped slashes (`file:\/\/`), or after `://`
+ * whose scheme is claimed text: a key glued on by `_` or `-` runs on into `file` (`sk-proj-…_file:///Users/…`), and
+ * the name after it must still be masked (found by the test generator).
  */
-const AFTER_FILE_URL = /(?<=(?:file|\0):\/\/)/iy;
+const AFTER_FILE_URL = /(?<=(?:file|\0):(?:\\*\/){2})/iy;
 /** Before a drive letter: not glued to a letter or digit (`xC:\Users\…`), except after an escape. */
 const DRIVE_START = new RegExp(start(ALNUM), 'y');
 /** A Windows home prefix (as in `HOME_PREFIX`) starting at `lastIndex`, its drive letter at a boundary. */
-const WINDOWS_PREFIX_AT = new RegExp(`${start(ALNUM)}[A-Za-z]:(\\\\+|/)[Uu][Ss][Ee][Rr][Ss]\\1`, 'y');
+const WINDOWS_PREFIX_AT = new RegExp(`${start(ALNUM)}[A-Za-z]:(\\\\*/|\\\\+)[Uu][Ss][Ee][Rr][Ss]\\1`, 'y');
 /**
  * Characters that end a user name: whitespace and control characters (`\0`, claimed text, too), quotes, path
  * separators and punctuation that cannot be in a Windows user name, and `(` `)` `` ` `` `{` `}`, which put a path in
@@ -480,7 +483,7 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
   HOME_PREFIX.lastIndex = 0;
   for (let m = HOME_PREFIX.exec(input); m; m = HOME_PREFIX.exec(input)) {
     const prefixEnd = HOME_PREFIX.lastIndex;
-    const guard = input[m.index] === '/' ? POSIX_HOME_START : DRIVE_START;
+    const guard = m[1] !== undefined ? POSIX_HOME_START : DRIVE_START;
     guard.lastIndex = m.index;
     AFTER_FILE_URL.lastIndex = m.index;
     const atBoundary = guard.test(input) || (guard === POSIX_HOME_START && AFTER_FILE_URL.test(input));
@@ -488,7 +491,7 @@ function* findHomeUsers(input: string): Iterable<readonly [number, number]> {
     HOME_PREFIX.lastIndex = m.index + 1;
     if (!atBoundary) continue;
     // Escapes are read in a POSIX path, or after an even run of backslashes (the path is JSON-encoded).
-    const escapes = m[1] === undefined || m[1] === '/' || m[1].length % 2 === 0;
+    const escapes = m[2] === undefined || m[2].endsWith('/') || m[2].length % 2 === 0;
     let e = prefixEnd;
     for (;;) {
       if (isNameChar(input, e)) e++;

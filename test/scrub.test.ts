@@ -762,6 +762,21 @@ describe('home-directory paths (issue #5)', () => {
     expect(scrub(once).findings).toEqual([]);
   });
 
+  it('JSON that escapes slashes (`\\/`), as PHP writes it, also inside JSON', () => {
+    for (const path of ['/home/jane/x', '/Users/jane/x', 'C:/Users/jane/x', 'file:///home/jane/x']) {
+      const once = JSON.stringify({ p: path }).replaceAll('/', '\\/');
+      const out = mask(once);
+      expect(out, once).toContain('[HOME_USER_1]');
+      expect(JSON.parse(out).p).toBe(path.replace('jane', '[HOME_USER_1]'));
+      // JSON inside JSON: `\\\/` one layer down is `\/`.
+      const twice = JSON.stringify({ q: once });
+      expect(JSON.parse(JSON.parse(mask(twice)).q).p, twice).toBe(path.replace('jane', '[HOME_USER_1]'));
+      expect(restore(out, scrub(once).map)).toBe(once);
+    }
+    // Still only at a path boundary.
+    expect(scrub(String.raw`"x\/home\/jane"`).findings).toEqual([]);
+  });
+
   describe('known limits', () => {
     it('a Windows name with a space, apostrophe or parenthesis is masked only up to it', () => {
       expect(mask(String.raw`C:\Users\Jane Doe\x`)).toBe(String.raw`C:\Users\[HOME_USER_1] Doe\x`);
@@ -769,13 +784,12 @@ describe('home-directory paths (issue #5)', () => {
       expect(mask(String.raw`C:\Users\jane(2)\x`)).toBe(String.raw`C:\Users\[HOME_USER_1](2)\x`);
     });
 
-    it('relative paths, mixed Windows separators, slash-escaped JSON and other home roots are not detected', () => {
+    it('relative paths, mixed Windows separators and other home roots are not detected', () => {
       for (const kept of [
         '../home/jane/x',
         'x//home/jane',
         String.raw`C:/Users\jane\x`,
         '/users/jane/x',
-        String.raw`"\/home\/jane"`,
         '~/x',
         '/root/x',
         String.raw`C:\Documents and Settings\jane`,
