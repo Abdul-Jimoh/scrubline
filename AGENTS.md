@@ -23,7 +23,7 @@ untrusted. A missed secret is a leak that cannot be taken back.
 - `factory/`: the scheduled agent. `agent-runner.sh` takes the oldest open issue labelled `ready-for-agent`, runs a
   headless coding agent on it with the prompts in `factory/prompts/`, checks, opens a PR, and works through Qodo's
   findings within fixed retry limits; `install-schedule.sh` runs it every 15 minutes with launchd (macOS).
-- `skills/verify-masking/`: an Agent Skill (`SKILL.md` plus two scripts) that verifies a detector change on
+- `skills/verify-masking/`: an Agent Skill (`SKILL.md` plus three scripts) that verifies a detector change on
   concrete inputs. `scripts/check.mjs` checks that every character of each value is masked, that `restore` is exact,
   that a stream cut at every position matches `scrub`, and that JSON stays valid, against any build.
   `scripts/build-at.sh` builds the source of another commit, such as the base, without touching the worktree, for a
