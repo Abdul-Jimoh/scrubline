@@ -136,8 +136,12 @@ const urlWithPassword = fc
  */
 const homePath = fc
   .tuple(
-    fc.constantFrom(' ', '\n', '(', '"', "'", '=', ':', '\\n', '\t', '\x1b[32m', '\\u001b[31m', '%20', '_', '-', '[', 'file://', 'FILE://'),
-    fc.constantFrom('/Users/', '/home/', 'C:\\Users\\', 'd:\\users\\', 'C:\\\\Users\\\\', 'C:/Users/', 'c:\\uSeRs\\', 'C:\\USERS\\'),
+    fc.constantFrom(' ', '\n', '(', '"', "'", '=', ':', '\\n', '\t', '\x1b[32m', '\\u001b[31m', '%20', '_', '-', '[', 'file://', 'FILE://', 'file:\\/\\/'),
+    fc.constantFrom(
+      ...['/Users/', '/home/', 'C:\\Users\\', 'd:\\users\\', 'C:\\\\Users\\\\', 'C:/Users/', 'c:\\uSeRs\\', 'C:\\USERS\\'],
+      // JSON that escapes slashes (issue #30), one and two layers deep.
+      ...['\\/home\\/', '\\/Users\\/', 'C:\\/Users\\/', '\\\\\\/home\\\\\\/', 'c:\\\\\\/uSeRs\\\\\\/'],
+    ),
     chars(LOW + UP + DIG + '._-', 6, 14).filter((n) => /[^.]$/.test(n) && !['shared', 'public', 'default'].includes(n.toLowerCase())),
     fc.constantFrom('', '/', '\\', ':', ' ', '"', "'", ')', '/projects/app/index.js:3:9', '\\app\\index.js', '\\\\x'),
   )

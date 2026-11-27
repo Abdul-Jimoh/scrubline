@@ -67,6 +67,10 @@ const adversarial: [string, string][] = [
   ['a drive letter followed by a long run of backslashes', 'C:' + '\\'.repeat(N)],
   ['drive prefixes back to back with no Users', 'C:\\\\'.repeat(N / 4)],
   ['home roots inside other paths', 'x/home/'.repeat(N / 7)],
+  ['a long backslash run before a home root', '\\'.repeat(N) + '/home/jane'],
+  ['slash-escaped home roots back to back', '\\/home'.repeat(N / 7)],
+  ['a file scheme then a long run of backslashes and slashes', 'file:' + '\\/'.repeat(N / 2) + 'home'],
+  ['file drive letters back to back', 'file://C:/'.repeat(N / 10)],
 ];
 
 describe('scan time stays linear on crafted input', () => {
