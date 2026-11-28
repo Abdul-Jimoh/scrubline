@@ -71,12 +71,97 @@ function parseArgs(argv: readonly string[]): Args {
   return args;
 }
 
-function readInput(file: string | undefined): string {
+/**
+ * Bytes that are not valid UTF-8 are kept, not replaced by U+FFFD (issue #16). Each such byte `b` is read as the lone
+ * surrogate U+DC00 + `b`, which no valid UTF-8 decodes to, and written back as `b`. Detectors see it as a character
+ * that is in no value (like U+FFFD before), and a value that holds one (a private key block a byte was corrupted in)
+ * keeps it in the map, where JSON writes it as the ASCII escape `\udcXX`, so the map stays UTF-8 JSON.
+ */
+const ESCAPE_BASE = 0xdc00;
+const strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** The length of the valid UTF-8 sequence at `i` (Unicode Table 3-7), or 0 if the byte there does not start one. */
+function sequenceLength(buf: Buffer, i: number): number {
+  const b = buf[i]!;
+  if (b < 0x80) return 1;
+  const cont = (k: number, lo = 0x80, hi = 0xbf) => i + k < buf.length && buf[i + k]! >= lo && buf[i + k]! <= hi;
+  if (b >= 0xc2 && b <= 0xdf) return cont(1) ? 2 : 0;
+  if (b >= 0xe0 && b <= 0xef) {
+    // E0 needs A0-BF next (no overlong forms); ED needs 80-9F (no surrogates).
+    const ok = b === 0xe0 ? cont(1, 0xa0) : b === 0xed ? cont(1, 0x80, 0x9f) : cont(1);
+    return ok && cont(2) ? 3 : 0;
+  }
+  if (b >= 0xf0 && b <= 0xf4) {
+    // F0 needs 90-BF next (no overlong forms); F4 needs 80-8F (nothing past U+10FFFF).
+    const ok = b === 0xf0 ? cont(1, 0x90) : b === 0xf4 ? cont(1, 0x80, 0x8f) : cont(1);
+    return ok && cont(2) && cont(3) ? 4 : 0;
+  }
+  return 0;
+}
+
+/**
+ * `buf` as text, each byte that is not part of a valid UTF-8 sequence read as U+DC00 + the byte. The code units are
+ * written to one UTF-16LE buffer (never more units than bytes), so input that is mostly not UTF-8 (a binary file)
+ * costs no more memory than text does.
+ */
+function decode(buf: Buffer): string {
   try {
-    return readFileSync(file ?? 0, 'utf8');
+    return strict.decode(buf);
+  } catch {
+    // Not valid UTF-8 somewhere: decode each sequence and escape each other byte.
+  }
+  const units = Buffer.allocUnsafe(buf.length * 2);
+  let k = 0;
+  const unit = (u: number) => (k = units.writeUInt16LE(u, k));
+  for (let i = 0; i < buf.length; ) {
+    const n = sequenceLength(buf, i);
+    const b = buf[i]!;
+    const c = (j: number) => buf[i + j]! & 0x3f;
+    if (n === 0) unit(ESCAPE_BASE + b);
+    else if (n === 1) unit(b);
+    else if (n === 2) unit(((b & 0x1f) << 6) | c(1));
+    else if (n === 3) unit(((b & 0x0f) << 12) | (c(1) << 6) | c(2));
+    else {
+      const cp = (((b & 0x07) << 18) | (c(1) << 12) | (c(2) << 6) | c(3)) - 0x10000;
+      unit(0xd800 + (cp >> 10));
+      unit(0xdc00 + (cp & 0x3ff));
+    }
+    i += n || 1;
+  }
+  return units.toString('utf16le', 0, k);
+}
+
+/** A lone U+DC80 to U+DCFF: a byte `decode` escaped. Part of a surrogate pair, the same code unit is valid text. */
+const ESCAPED = /(?<![\uD800-\uDBFF])[\uDC80-\uDCFF]/;
+
+/** `text` as UTF-8, with each byte `decode` escaped written back as that byte. */
+function encode(text: string): Buffer {
+  if (!ESCAPED.test(text)) return Buffer.from(text, 'utf8');
+  const out = Buffer.allocUnsafe(text.length * 3);
+  let k = 0;
+  for (let i = 0; i < text.length; i++) {
+    const u = text.charCodeAt(i);
+    const next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+    if (u >= 0xd800 && u <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      // A surrogate pair: one character outside the Basic Multilingual Plane, four bytes.
+      k += out.write(text.slice(i, i + 2), k, 'utf8');
+      i++;
+    } else if (u >= 0xdc80 && u <= 0xdcff) out[k++] = u - ESCAPE_BASE;
+    else if (u < 0x80) out[k++] = u;
+    // Any other code unit, a lone surrogate included (written as U+FFFD, as `Buffer.from` would).
+    else k += out.write(text[i]!, k, 'utf8');
+  }
+  return out.subarray(0, k);
+}
+
+function readInput(file: string | undefined): string {
+  let buf: Buffer;
+  try {
+    buf = readFileSync(file ?? 0);
   } catch {
     throw new UsageError(file === undefined ? 'cannot read stdin' : 'cannot read the input file');
   }
+  return decode(buf);
 }
 
 /** The map in `file`, or `undefined` when there is no such file. */
@@ -297,7 +382,10 @@ function writeMap(target: string, map: ScrubMap): void {
   }
 }
 
-/** Writes to stdout. A reader that closes early (`| head`) is not an error; anything else exits 2. */
+/**
+ * Writes to stdout, with each byte the input held that is not valid UTF-8 put back. A reader that closes early
+ * (`| head`) is not an error; anything else exits 2.
+ */
 function output(text: string): void {
   process.stdout.on('error', (e: NodeJS.ErrnoException) => {
     if (e.code !== 'EPIPE') {
@@ -305,7 +393,7 @@ function output(text: string): void {
       process.exitCode = 2;
     }
   });
-  process.stdout.write(text);
+  process.stdout.write(encode(text));
 }
 
 function run(argv: readonly string[]): void {

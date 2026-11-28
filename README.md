@@ -74,7 +74,8 @@ pbpaste | node dist/cli.js --map ~/.scrubline/map.json | pbcopy
 pbpaste | node dist/cli.js restore --map ~/.scrubline/map.json
 ```
 
-`scrubline [file] [--map <file>] [--summary]` masks a file or stdin to stdout; every other byte is left as it was.
+`scrubline [file] [--map <file>] [--summary]` masks a file or stdin to stdout; every other byte is left as it was,
+also bytes that are not valid UTF-8 (a binary log, a file in another encoding).
 `--map` keeps the originals in a JSON file (mode 0600) and adds to it on each run, so a value keeps its placeholder
 across pastes. Runs that share a map take turns (a `.lock` file next to it holds the running process's id and start time; a lock left
 by a run that was stopped is taken over, and a paused run that lost its lock writes nothing), a symlinked map is written through to its target, and placeholder text you typed yourself is recorded as standing for itself, so no later run gives it a value.
@@ -188,7 +189,8 @@ not stream yet: it reads its whole input.
   the part before is too short for its own format, it stays visible: at most the prefix and 9 characters
   (`xoxb-1234-`); the rest is masked.
 - `user:password@host` with no `scheme://` in front (`curl -u`, some config formats) is not detected.
-- The CLI reads its input as UTF-8: a byte that is not valid UTF-8 comes out as U+FFFD (`�`).
+- The CLI keeps a byte that is not valid UTF-8 as the lone surrogate U+DC00 plus the byte, and writes such a
+  surrogate back as the byte. A map edited by hand to hold `\udc80` to `\udcff` restores those as single bytes.
 - A private key block is masked from BEGIN to the next END line within 64 KB, even when the BEGIN belonged to a
   truncated paste and the END to a later block: everything in between is masked too (over-masking, not a leak).
 - With no END line within 64 KB, a block is masked up to the first character a key block cannot hold, such as the
@@ -222,7 +224,7 @@ every push to `main` (`.github/workflows/check.yml`), and a pull request cannot 
 | URL passwords: any scheme, only the password masked, encoded passwords and ones holding a raw `@`, `:`, `/`, `?` or `#`, ports, IPv6 hosts and path or query look-alikes kept, JSON (slash-escaped, `\u`-escaped, nested) stays valid, a key as the user name or inside the password keeps its type and does not hide the password, and the limits above | `test/scrub.test.ts`: "passwords in URLs" |
 | A drive letter in a `file:` URL (issue #30): not a user name and password, so the path is masked as it is without the scheme and no part of an address in it stays visible; other schemes and longer user names unchanged; restore, and a stream's text and map | `test/scrub.test.ts`: "a drive letter in a file:// URL" |
 | Home paths: `/Users`, `/home`, `X:\Users` on any drive, `X:/Users`, JSON-escaped, slash-escaped (`\/`) and JSON inside JSON; at the end of a path; shared folders and an empty `/home/` kept; `Users` and `file://` in any case; names written with `\uXXXX` escapes in JSON; only at a path boundary (and after `file://`, an escape, or a key that ran into the drive letter); one placeholder per name across forms; restore and JSON validity; the limits above | `test/scrub.test.ts`: "home-directory paths" |
-| The CLI: bytes kept (BOM, CRLF, non-ASCII, no final newline), file or stdin, the map file (mode 0600 new or rewritten, merged across runs and across 8 overlapping runs, never reassigned, symlinks followed, leftover temporary files removed), typed placeholders kept, a stopped run's lock taken over and a live one waited for, restore, `--summary`, `--`, exit codes, `\| head`, and errors that show no input, map value or argument | `test/cli.test.ts` (runs the built `dist/cli.js`); `test/scrub.test.ts`: "continuing from an earlier map" |
+| The CLI: bytes kept (BOM, CRLF, non-ASCII, no final newline, and bytes that are not valid UTF-8, also inside a masked value and through restore), file or stdin, the map file (mode 0600 new or rewritten, merged across runs and across 8 overlapping runs, never reassigned, symlinks followed, leftover temporary files removed), typed placeholders kept, a stopped run's lock taken over and a live one waited for, restore, `--summary`, `--`, exit codes, `\| head`, and errors that show no input, map value or argument | `test/cli.test.ts` (runs the built `dist/cli.js`); `test/scrub.test.ts`: "continuing from an earlier map" |
 | Card numbers: grouped and ungrouped, with plain, double, no-break or URL-encoded spaces or tabs, Amex grouping, a card next to a date, a year or other digits, after `%`, in JSON inside JSON; Luhn failures, timestamps, and glued, mixed-separator or unprinted groupings kept | `test/scrub.test.ts`: "masks card numbers" |
 | A card that is a bare JSON member value becomes a JSON string, one to three layers deep, compact or pretty-printed, and `restore` gives the number back; whitespace around the `:`; an array element, a fraction, seven layers or a gap past the bounds keeps the plain placeholder; a quoted look-alike the CLI records as itself keeps its quotes | `test/scrub.test.ts`: "masks a card written as a bare JSON number"; `test/properties.test.ts`: "cards written as bare JSON numbers"; `test/cli.test.ts`: "a quoted look-alike of a CARD_NUMBER_JSON placeholder" |
 | Findings never contain the values | `test/scrub.test.ts`, `test/properties.test.ts` |
