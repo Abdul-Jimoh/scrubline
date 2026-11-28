@@ -22,7 +22,9 @@ untrusted. A missed secret is a leak that cannot be taken back.
 - `test/fixtures.ts`: one fake sample per detector (`FAKE`), assembled at runtime with `j()`.
 - `factory/`: the scheduled agent. `agent-runner.sh` takes the oldest open issue labelled `ready-for-agent`, runs a
   headless coding agent on it with the prompts in `factory/prompts/`, checks, opens a PR, and works through Qodo's
-  findings within fixed retry limits; `install-schedule.sh` runs it every 15 minutes with launchd (macOS).
+  findings within fixed retry limits; `install-schedule.sh` runs it every 15 minutes with launchd (macOS). A Claude
+  usage limit puts the ticket back in the queue and pauses the runner. `tests/usage-limit.sh` runs the runner
+  against stubbed `gh`, `claude` and `npm` (CI runs it).
 - `skills/verify-masking/`: an Agent Skill (`SKILL.md` plus three scripts) that verifies a detector change on
   concrete inputs. `scripts/check.mjs` checks that every character of each value is masked, that `restore` is exact,
   that a stream cut at every position matches `scrub`, and that JSON stays valid, against any build.

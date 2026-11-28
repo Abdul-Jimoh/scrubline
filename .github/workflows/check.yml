@@ -36,3 +36,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      # The scheduled runner against stubbed gh, claude and npm: no network, no secrets.
+      - run: bash factory/tests/usage-limit.sh

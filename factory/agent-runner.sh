@@ -11,7 +11,8 @@
 #      AGENTS.md), gives them to the agent (factory/prompts/fix-review.md), checks again (with the same MAX_ATTEMPTS
 #      retries) and pushes, up to MAX_REVIEW_ROUNDS times, stopping early if a finding survives a fix; Low findings
 #      are listed for the human when it hands over;
-#   6. stops with label `agent-needs-help` and a comment on the issue whenever a limit is hit or something fails.
+#   6. stops with label `agent-needs-help` and a comment on the issue whenever a limit is hit or something fails,
+#      except a Claude usage limit: then it puts the ticket back in the queue and pauses (USAGE_LIMIT_PAUSE).
 # It never merges: the human does. Text the agent wrote is scrubbed with Scrubline before it is posted.
 # One installation per repository: the lock is local, so two machines running this could claim the same ticket.
 set -uo pipefail
@@ -24,6 +25,7 @@ MAX_ATTEMPTS=${MAX_ATTEMPTS:-3}          # implement + check attempts
 MAX_REVIEW_ROUNDS=${MAX_REVIEW_ROUNDS:-2} # fix rounds after Qodo findings
 AGENT_TIMEOUT=${AGENT_TIMEOUT:-2400}     # seconds per agent session
 REVIEW_TIMEOUT=${REVIEW_TIMEOUT:-1500}   # seconds to wait for a Qodo review of a commit
+USAGE_LIMIT_PAUSE=${USAGE_LIMIT_PAUSE:-3600} # seconds to wait after a Claude usage limit before taking a ticket
 PROMPTS="$(cd "$(dirname "$0")" && pwd)/prompts"
 
 # launchd starts with a bare PATH.
@@ -42,6 +44,13 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 echo $$ >"$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
+
+# After a Claude usage limit, no ticket is taken until the pause ends: a run before then would hit the same limit.
+PAUSE="$WORK/paused-until"
+if [ -s "$PAUSE" ]; then
+  until_s=$(cat "$PAUSE")
+  case $until_s in '' | *[!0-9]*) rm -f "$PAUSE" ;; *) [ "$(date +%s)" -lt "$until_s" ] && exit 0 ;; esac
+fi
 
 # A ticket already claimed (working, or stopped for help) blocks the queue until a human clears it.
 claimed=$(gh issue list -R "$REPO" --state open --label agent-working --json number --jq 'length') || exit 0
@@ -91,6 +100,30 @@ Run \`$RUN_ID\`. $where Remove \`agent-needs-help\` and \`agent-working\` to rel
   exit 1
 }
 trap 'needs_help "the run was interrupted"' INT TERM
+
+# True when agent result $1 (and its stderr, $1.err) says the session hit a Claude usage or rate limit. A limit is not
+# the ticket's fault and passes on its own, so it should not wait for a human. Anything not recognised here still
+# stops for help, as before.
+usage_limited() {
+  jq -e '.is_error == true and ((.api_error_status // 0) == 429
+    or ((.result // "") | test("usage limit|hit your limit|rate limit"; "i")))' "$1" >/dev/null 2>&1 ||
+    grep -qiE 'usage limit|hit your limit|rate limit' "$1.err" 2>/dev/null
+}
+
+# Puts the ticket back in the queue after a usage limit and pauses the runner for USAGE_LIMIT_PAUSE seconds. A retry
+# starts from main (see `push`), so the work of this run is redone, not continued.
+requeue() {
+  trap - INT TERM
+  local until_s=$(($(date +%s) + USAGE_LIMIT_PAUSE)) where
+  echo "$until_s" >"$PAUSE"
+  log "PAUSE: Claude usage limit; back in the queue, next run after $(date -u -r "$until_s" +%FT%TZ 2>/dev/null || echo "$USAGE_LIMIT_PAUSE s")"
+  if [ "$PUSHED" = yes ]; then where=" The branch and PR stay as they are until the retry replaces them${PR_URL:+ ($PR_URL)}."
+  else where=" Nothing was pushed."; fi
+  gh issue edit "$ISSUE" -R "$REPO" --remove-label agent-working --add-label ready-for-agent >/dev/null ||
+    needs_help "the agent hit a Claude usage limit, and the ticket could not be put back in the queue"
+  comment "The scheduled agent hit a Claude usage limit (run \`$RUN_ID\`) and put this ticket back in the queue. It starts over in about $((USAGE_LIMIT_PAUSE / 60)) minutes.$where"
+  exit 0
+}
 
 # Fills {{NAME}} in a prompt template from the shell variables of the same name; fails on a missing or empty template.
 render() {
@@ -143,7 +176,8 @@ agent() {
   [ -s "$out" ] && summary=$(jq -r '"\(.num_turns) turns, \((.duration_ms // 0) / 1000 | floor) s"' "$out" 2>/dev/null)
   # 142 is SIGALRM: the session ran past AGENT_TIMEOUT.
   log "agent exit $rc (${summary:-no result}$([ "$rc" = 142 ] && echo ", timed out after $AGENT_TIMEOUT s"))"
-  # A session that timed out or failed may have left half-done work that still passes the checks: stop instead.
+  # A usage limit is waited out; any other failure may have left half-done work that still passes the checks: stop.
+  [ "$rc" != 0 ] && [ "$rc" != 142 ] && usage_limited "$out" && requeue
   [ "$rc" = 0 ] || needs_help "the agent session ended with exit $rc$([ "$rc" = 142 ] && echo " (timed out)")"
 }
 
