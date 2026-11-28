@@ -27,7 +27,7 @@ afterAll(() => {
 let cwd = '';
 function cli(args: string[], input: string | Buffer = '') {
   cwd ||= tmp();
-  const r = spawnSync(process.execPath, [CLI, ...args], { input, cwd });
+  const r = spawnSync(process.execPath, [CLI, ...args], { input, cwd, maxBuffer: 64 * 1024 * 1024 });
   return { code: r.status, stdout: r.stdout.toString('utf8'), stderr: r.stderr.toString('utf8'), raw: r.stdout };
 }
 
@@ -59,8 +59,58 @@ describe('scrubline (issue #4)', () => {
     expect(r.stderr).toBe('');
   });
 
-  it('known limit: input is read as UTF-8, so a byte that is not valid UTF-8 becomes U+FFFD', () => {
-    expect(cli([], Buffer.from([0xff, 0x61])).raw).toEqual(Buffer.from('\uFFFDa', 'utf8'));
+  describe('bytes that are not valid UTF-8 come out unchanged (issue #16)', () => {
+    // A stray byte, a lone continuation byte, a cut-off sequence, an overlong `/`, an encoded surrogate, a byte past
+    // U+10FFFF and a cut-off four-byte sequence at the very end, around valid text and two values.
+    const b = (...bytes: number[]) => Buffer.from(bytes);
+    const u = (s: string) => Buffer.from(s, 'utf8');
+    const input = Buffer.concat([
+      b(0xff), u(`log ${FAKE.EMAIL} `), b(0x80), u('caf\u00E9 '), b(0xe2, 0x82), u(' x'), b(0xc0, 0xaf),
+      b(0xed, 0xa0, 0x80), u(` ${FAKE.GITHUB_TOKEN}`), b(0xf5), u(' \u2615 \u{1F600} end'), b(0xf0, 0x9f, 0x98),
+    ]);
+    const masked = Buffer.concat([
+      b(0xff), u('log [EMAIL_1] '), b(0x80), u('caf\u00E9 '), b(0xe2, 0x82), u(' x'), b(0xc0, 0xaf),
+      b(0xed, 0xa0, 0x80), u(' [GITHUB_TOKEN_1]'), b(0xf5), u(' \u2615 \u{1F600} end'), b(0xf0, 0x9f, 0x98),
+    ]);
+
+    it('outside masked spans, with scrub', () => {
+      const r = cli([], input);
+      expect(r.code).toBe(0);
+      expect(r.raw.equals(masked)).toBe(true);
+    });
+
+    it('with restore, also for a value that holds such a byte, and the map stays UTF-8 JSON', () => {
+      const dir = tmp();
+      const map = join(dir, 'map.json');
+      // A private key block that a byte was corrupted in is still masked whole, so the map holds that byte.
+      const key = FAKE.PRIVATE_KEY.replace('MIIE', 'MI\u0000IE');
+      const withKey = Buffer.concat([input, u('\n'), ...key.split('\u0000').flatMap((part, i) => (i ? [b(0xfe), u(part)] : [u(part)]))]);
+      const scrubbed = cli(['--map', map], withKey);
+      expect(scrubbed.code).toBe(0);
+      expect(scrubbed.raw.equals(Buffer.concat([masked, u('\n[PRIVATE_KEY_1]')]))).toBe(true);
+      const raw = readFileSync(map);
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
+      expect(Object.keys(JSON.parse(text) as object).sort()).toEqual(['[EMAIL_1]', '[GITHUB_TOKEN_1]', '[PRIVATE_KEY_1]']);
+      const restored = cli(['restore', '--map', map], scrubbed.raw);
+      expect(restored.code).toBe(0);
+      expect(restored.raw.equals(withKey)).toBe(true);
+    });
+
+    it('a file with only such bytes, or none at all', () => {
+      expect(cli([], b(0xff, 0xfe, 0x80)).raw.equals(b(0xff, 0xfe, 0x80))).toBe(true);
+      expect(cli([], b()).raw.length).toBe(0);
+    });
+
+    it('a large binary file, through scrub and restore, back to the same bytes', () => {
+      // 8 MB of bytes from a fixed seed, mostly not UTF-8.
+      const bin = Buffer.alloc(8 * 1024 * 1024);
+      for (let i = 0, x = 7; i < bin.length; i++) bin[i] = (x = (x * 1103515245 + 12345) >>> 0) >>> 24;
+      const map = join(tmp(), 'map.json');
+      const scrubbed = cli(['--map', map], bin);
+      expect(scrubbed.code).toBe(0);
+      const restored = cli(['restore', '--map', map], scrubbed.raw);
+      expect(restored.raw.equals(bin)).toBe(true);
+    }, 60_000);
   });
 
   it('reads a file given as an argument, and - as stdin', () => {
